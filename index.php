@@ -326,7 +326,7 @@ button{background:#087a46;color:white;border:0;font-weight:bold;cursor:pointer}
 .btn-danger{display:inline-block;background:#b00020;color:white;border:0;padding:9px 12px;border-radius:8px;text-decoration:none;font-weight:bold}
 .filters{background:#f7fbf9;border:1px solid #dcefe6;border-radius:12px;padding:14px;margin:12px 0 16px}
 .filters-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto;gap:10px;align-items:center}
-.filters-grid.empresas{grid-template-columns:2fr 1fr auto}
+.filters-grid.empresas{grid-template-columns:1.2fr 2fr 1fr auto}
 .filters input,.filters select{width:100%;background:white}
 .filters button{white-space:nowrap}
 table{width:100%;border-collapse:collapse}
@@ -454,6 +454,12 @@ Comprobante actual:
 
 <div class="filters">
 <div class="filters-grid empresas">
+<select id="filtroEmpresaCategoria">
+<option value="">Todas</option>
+<option value="os">Obra Social</option>
+<option value="sindicato">Sindicato</option>
+<option value="mutual">Mutual</option>
+</select>
 <input type="text" id="filtroEmpresaTexto" placeholder="Buscar por razón social o CUIT">
 <select id="filtroEmpresaEstado">
 <option value="">Todas</option>
@@ -470,37 +476,54 @@ Comprobante actual:
 <th>Razón Social</th>
 <th>CUIT</th>
 <th>Deuda OS</th>
+<th>Cobrado OS</th>
 <th>Saldo OS</th>
 <th>Deuda Sindicato</th>
+<th>Cobrado Sindicato</th>
 <th>Saldo Sindicato</th>
 <th>Deuda Mutual</th>
+<th>Cobrado Mutual</th>
 <th>Saldo Mutual</th>
 <th>Acciones</th>
 </tr>
 </thead>
 <tbody>
 <?php if(empty($empresas)): ?>
-<tr><td colspan="9" class="sin">Todavía no hay empresas cargadas.</td></tr>
+<tr><td colspan="12" class="sin">Todavía no hay empresas cargadas.</td></tr>
 <?php endif; ?>
 
 <?php foreach($empresas as $emp):
+$deudaOS = floatval($emp["deuda_os"] ?? 0);
+$deudaSind = floatval($emp["deuda_sindicato"] ?? 0);
+$deudaMutual = floatval($emp["deuda_mutual"] ?? 0);
+
 $pagadoOS = totalPagado($pagos, $emp["id"], "Obra Social");
 $pagadoSind = totalPagado($pagos, $emp["id"], "Sindicato");
 $pagadoMutual = totalPagado($pagos, $emp["id"], "Mutual");
 
-$saldoOS = floatval($emp["deuda_os"] ?? 0) - $pagadoOS;
-$saldoSind = floatval($emp["deuda_sindicato"] ?? 0) - $pagadoSind;
-$saldoMutual = floatval($emp["deuda_mutual"] ?? 0) - $pagadoMutual;
-$estadoEmpresa = ($saldoOS > 0 || $saldoSind > 0 || $saldoMutual > 0) ? "deuda" : "cancelada";
+$saldoOS = max($deudaOS - $pagadoOS, 0);
+$saldoSind = max($deudaSind - $pagadoSind, 0);
+$saldoMutual = max($deudaMutual - $pagadoMutual, 0);
+
+$tieneDeudaCargada = ($deudaOS > 0 || $deudaSind > 0 || $deudaMutual > 0);
+$tieneSaldoPendiente = ($saldoOS > 0 || $saldoSind > 0 || $saldoMutual > 0);
+$estadoEmpresa = $tieneSaldoPendiente ? "deuda" : ($tieneDeudaCargada ? "cancelada" : "");
+
+$categoriaOS = ($deudaOS > 0 || $pagadoOS > 0) ? "1" : "0";
+$categoriaSind = ($deudaSind > 0 || $pagadoSind > 0) ? "1" : "0";
+$categoriaMutual = ($deudaMutual > 0 || $pagadoMutual > 0) ? "1" : "0";
 ?>
-<tr class="fila-empresa" data-busqueda="<?= e(($emp["razon"] ?? "") . " " . ($emp["cuit"] ?? "")) ?>" data-estado="<?= e($estadoEmpresa) ?>">
+<tr class="fila-empresa" data-busqueda="<?= e(($emp["razon"] ?? "") . " " . ($emp["cuit"] ?? "")) ?>" data-estado="<?= e($estadoEmpresa) ?>" data-os="<?= e($categoriaOS) ?>" data-sindicato="<?= e($categoriaSind) ?>" data-mutual="<?= e($categoriaMutual) ?>">
 <td><?= e($emp["razon"]) ?></td>
 <td><?= e($emp["cuit"]) ?></td>
-<td><?= dinero($emp["deuda_os"] ?? 0) ?></td>
+<td><?= dinero($deudaOS) ?></td>
+<td class="saldo-ok"><?= dinero($pagadoOS) ?></td>
 <td class="<?= $saldoOS <= 0 ? 'saldo-ok' : 'saldo-debe' ?>"><?= dinero($saldoOS) ?></td>
-<td><?= dinero($emp["deuda_sindicato"] ?? 0) ?></td>
+<td><?= dinero($deudaSind) ?></td>
+<td class="saldo-ok"><?= dinero($pagadoSind) ?></td>
 <td class="<?= $saldoSind <= 0 ? 'saldo-ok' : 'saldo-debe' ?>"><?= dinero($saldoSind) ?></td>
-<td><?= dinero($emp["deuda_mutual"] ?? 0) ?></td>
+<td><?= dinero($deudaMutual) ?></td>
+<td class="saldo-ok"><?= dinero($pagadoMutual) ?></td>
 <td class="<?= $saldoMutual <= 0 ? 'saldo-ok' : 'saldo-debe' ?>"><?= dinero($saldoMutual) ?></td>
 <td class="acciones">
 <a href="?editar_empresa=<?= e($emp["id"]) ?>" title="Editar empresa">✏️</a>
@@ -621,26 +644,31 @@ function textoNormalizado(valor) {
 }
 
 function configurarFiltrosEmpresas() {
+    const categoria = document.getElementById("filtroEmpresaCategoria");
     const texto = document.getElementById("filtroEmpresaTexto");
     const estado = document.getElementById("filtroEmpresaEstado");
     const limpiar = document.getElementById("limpiarFiltrosEmpresas");
     const filas = Array.from(document.querySelectorAll(".fila-empresa"));
-    if (!texto || !estado || !limpiar) return;
+    if (!categoria || !texto || !estado || !limpiar) return;
 
     const aplicar = () => {
+        const categoriaValor = categoria.value;
         const busqueda = textoNormalizado(texto.value);
         const estadoValor = estado.value;
 
         filas.forEach((fila) => {
+            const coincideCategoria = !categoriaValor || fila.dataset[categoriaValor] === "1";
             const coincideTexto = textoNormalizado(fila.dataset.busqueda).includes(busqueda);
             const coincideEstado = !estadoValor || fila.dataset.estado === estadoValor;
-            fila.classList.toggle("fila-oculta", !(coincideTexto && coincideEstado));
+            fila.classList.toggle("fila-oculta", !(coincideCategoria && coincideTexto && coincideEstado));
         });
     };
 
+    categoria.addEventListener("change", aplicar);
     texto.addEventListener("input", aplicar);
     estado.addEventListener("change", aplicar);
     limpiar.addEventListener("click", () => {
+        categoria.value = "";
         texto.value = "";
         estado.value = "";
         aplicar();
