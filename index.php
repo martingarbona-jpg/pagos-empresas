@@ -286,20 +286,28 @@ if ($errorPago !== "" && isset($_POST["guardar_pago"])) {
     ];
 }
 
-$totalDeuda = 0;
 $totalCobrado = 0;
-
-foreach ($empresas as $emp) {
-    $totalDeuda += floatval($emp["deuda_os"] ?? 0);
-    $totalDeuda += floatval($emp["deuda_sindicato"] ?? 0);
-    $totalDeuda += floatval($emp["deuda_mutual"] ?? 0);
-}
+$cobradoOS = 0;
+$cobradoSindicato = 0;
+$cobradoMutual = 0;
 
 foreach ($pagos as $p) {
-    $totalCobrado += floatval($p["monto"] ?? 0);
+    $monto = floatval($p["monto"] ?? 0);
+    $totalCobrado += $monto;
+
+    if (($p["tipo"] ?? "") === "Obra Social") {
+        $cobradoOS += $monto;
+    } elseif (($p["tipo"] ?? "") === "Sindicato") {
+        $cobradoSindicato += $monto;
+    } elseif (($p["tipo"] ?? "") === "Mutual") {
+        $cobradoMutual += $monto;
+    }
 }
 
-$saldoPendiente = $totalDeuda - $totalCobrado;
+$totalCobrado = max($totalCobrado, 0);
+$cobradoOS = max($cobradoOS, 0);
+$cobradoSindicato = max($cobradoSindicato, 0);
+$cobradoMutual = max($cobradoMutual, 0);
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -320,7 +328,7 @@ main{padding:20px}
 .card.is-collapsed .card-body{display:none}
 .quick-actions{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px}
 .quick-actions button{width:auto}
-.resumen{display:grid;grid-template-columns:repeat(3,1fr);gap:15px}
+.resumen{display:grid;grid-template-columns:repeat(4,1fr);gap:15px}
 .box{background:#eaf7f0;padding:18px;border-radius:14px}
 .label{font-size:14px;color:#555}
 .num{font-size:26px;font-weight:bold;color:#087a46;margin-top:5px}
@@ -359,9 +367,10 @@ th{background:#087a46;color:white}
 <main>
 
 <div class="card resumen">
-<div class="box"><div class="label">Deuda total cargada</div><div class="num"><?= dinero($totalDeuda) ?></div></div>
 <div class="box"><div class="label">Total cobrado</div><div class="num"><?= dinero($totalCobrado) ?></div></div>
-<div class="box"><div class="label">Saldo pendiente</div><div class="num"><?= dinero($saldoPendiente) ?></div></div>
+<div class="box"><div class="label">Cobrado Obra Social</div><div class="num"><?= dinero($cobradoOS) ?></div></div>
+<div class="box"><div class="label">Cobrado Sindicato</div><div class="num"><?= dinero($cobradoSindicato) ?></div></div>
+<div class="box"><div class="label">Cobrado Mutual</div><div class="num"><?= dinero($cobradoMutual) ?></div></div>
 </div>
 
 <div class="quick-actions">
