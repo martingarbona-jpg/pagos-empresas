@@ -81,6 +81,52 @@ function totalPagado($pagos, $empresaId, $tipo) {
     return $total;
 }
 
+function acuerdoDefault() {
+    return [
+        "monto_total" => 0,
+        "cantidad_cuotas" => 1,
+        "monto_cuota" => 0,
+        "periodo_desde" => "",
+        "periodo_hasta" => "",
+        "observaciones" => ""
+    ];
+}
+
+function acuerdoEmpresa($empresa, $tipo) {
+    $base = acuerdoDefault();
+    if (isset($empresa["acuerdos"]) && is_array($empresa["acuerdos"]) && isset($empresa["acuerdos"][$tipo]) && is_array($empresa["acuerdos"][$tipo])) {
+        return array_merge($base, $empresa["acuerdos"][$tipo]);
+    }
+
+    if (!empty($empresa["monto_total"]) || !empty($empresa["monto_cuota"]) || !empty($empresa["periodo_desde"]) || !empty($empresa["periodo_hasta"])) {
+        return array_merge($base, [
+            "monto_total" => floatval($empresa["monto_total"] ?? 0),
+            "cantidad_cuotas" => max(intval($empresa["cantidad_cuotas"] ?? 1), 1),
+            "monto_cuota" => floatval($empresa["monto_cuota"] ?? 0),
+            "periodo_desde" => periodoParaInput($empresa["periodo_desde"] ?? ""),
+            "periodo_hasta" => periodoParaInput($empresa["periodo_hasta"] ?? ""),
+            "observaciones" => $empresa["observaciones_acuerdo"] ?? ""
+        ]);
+    }
+
+    return $base;
+}
+
+function resumenAcuerdosEmpresa($empresa) {
+    $partes = [];
+    foreach (["Obra Social","Sindicato","Mutual"] as $tipo) {
+        $a = acuerdoEmpresa($empresa, $tipo);
+        if (floatval($a["monto_total"] ?? 0) <= 0 && floatval($a["monto_cuota"] ?? 0) <= 0) continue;
+
+        $cuotas = max(intval($a["cantidad_cuotas"] ?? 1), 1);
+        $plan = $cuotas > 1 ? "Acuerdo" : "Pago único";
+        $periodo = trim(($a["periodo_desde"] ?? "") . (($a["periodo_desde"] ?? "") && ($a["periodo_hasta"] ?? "") ? " a " : "") . ($a["periodo_hasta"] ?? ""));
+        $detalle = $cuotas > 1 ? ($cuotas . " x " . dinero($a["monto_cuota"] ?? 0)) : dinero($a["monto_total"] ?? 0);
+        $partes[] = $tipo . ": " . $plan . " " . $detalle . ($periodo ? " (" . $periodo . ")" : "");
+    }
+    return $partes ? implode(" | ", $partes) : "Sin acuerdo cargado";
+}
+
 if (isset($_POST["login"])) {
     if (($_POST["password"] ?? "") === $PASSWORD) {
         $_SESSION["auth_pagos_empresas"] = true;
@@ -132,25 +178,6 @@ $errorPago = "";
 
 if (isset($_POST["guardar_empresa"])) {
     $id = $_POST["empresa_id"] ?: uniqid("emp_");
-    $montoTotal = floatval($_POST["monto_total"] ?? 0);
-    $cantidadCuotas = intval($_POST["cantidad_cuotas"] ?? 1);
-    $montoCuota = floatval($_POST["monto_cuota"] ?? 0);
-    $periodoDesde = trim($_POST["periodo_desde"] ?? "");
-    $periodoHasta = trim($_POST["periodo_hasta"] ?? "");
-
-    if ($montoTotal < 0) {
-        $errorEmpresa = "El monto total no puede ser negativo.";
-    } elseif ($cantidadCuotas < 1) {
-        $errorEmpresa = "La cantidad de cuotas debe ser como mínimo 1.";
-    } elseif ($cantidadCuotas > 1 && $montoCuota <= 0) {
-        $errorEmpresa = "Si hay acuerdo, el monto de cada cuota debe ser mayor a 0.";
-    } elseif ($cantidadCuotas > 1 && ($periodoDesde === "" || $periodoHasta === "")) {
-        $errorEmpresa = "Si hay acuerdo, el período desde y el período hasta son obligatorios.";
-    } elseif ($periodoDesde !== "" && !periodoValido($periodoDesde)) {
-        $errorEmpresa = "El período desde debe tener formato MM/AA.";
-    } elseif ($periodoHasta !== "" && !periodoValido($periodoHasta)) {
-        $errorEmpresa = "El período hasta debe tener formato MM/AA.";
-    }
 
     $nueva = [
         "id" => $id,
@@ -159,12 +186,6 @@ if (isset($_POST["guardar_empresa"])) {
         "deuda_os" => floatval($_POST["deuda_os"] ?? 0),
         "deuda_sindicato" => floatval($_POST["deuda_sindicato"] ?? 0),
         "deuda_mutual" => floatval($_POST["deuda_mutual"] ?? 0),
-        "monto_total" => $montoTotal,
-        "cantidad_cuotas" => $cantidadCuotas,
-        "monto_cuota" => $montoCuota,
-        "periodo_desde" => $periodoDesde,
-        "periodo_hasta" => $periodoHasta,
-        "observaciones_acuerdo" => trim($_POST["observaciones_acuerdo"] ?? ""),
         "observaciones" => trim($_POST["observaciones_empresa"] ?? ""),
         "fecha_carga" => date("Y-m-d H:i:s")
     ];
@@ -174,6 +195,10 @@ if (isset($_POST["guardar_empresa"])) {
         foreach ($empresas as $k => $emp) {
             if (($emp["id"] ?? "") === $id) {
                 $nueva["fecha_carga"] = $emp["fecha_carga"] ?? date("Y-m-d H:i:s");
+                $nueva["acuerdos"] = $emp["acuerdos"] ?? [];
+                foreach (["monto_total","cantidad_cuotas","monto_cuota","periodo_desde","periodo_hasta","observaciones_acuerdo"] as $campoViejo) {
+                    if (isset($emp[$campoViejo])) $nueva[$campoViejo] = $emp[$campoViejo];
+                }
                 $empresas[$k] = $nueva;
                 $editado = true;
                 break;
@@ -184,6 +209,57 @@ if (isset($_POST["guardar_empresa"])) {
 
         guardarJson($empresasFile, $empresas);
         header("Location: index.php");
+        exit;
+    }
+}
+
+if (isset($_POST["guardar_acuerdo"])) {
+    $empresaIdAcuerdo = $_POST["acuerdo_empresa_id"] ?? "";
+    $tipoAcuerdo = $_POST["acuerdo_tipo"] ?? "";
+    $montoTotalAcuerdo = floatval($_POST["acuerdo_monto_total"] ?? 0);
+    $cantidadCuotasAcuerdo = intval($_POST["acuerdo_cantidad_cuotas"] ?? 1);
+    $montoCuotaAcuerdo = floatval($_POST["acuerdo_monto_cuota"] ?? 0);
+    $periodoDesdeAcuerdo = trim($_POST["acuerdo_periodo_desde"] ?? "");
+    $periodoHastaAcuerdo = trim($_POST["acuerdo_periodo_hasta"] ?? "");
+
+    if ($empresaIdAcuerdo === "") {
+        $errorEmpresa = "Seleccioná una empresa para cargar el acuerdo.";
+    } elseif (!in_array($tipoAcuerdo, ["Obra Social","Sindicato","Mutual"], true)) {
+        $errorEmpresa = "Seleccioná un tipo de acuerdo válido.";
+    } elseif ($montoTotalAcuerdo < 0) {
+        $errorEmpresa = "El monto total del acuerdo no puede ser negativo.";
+    } elseif ($cantidadCuotasAcuerdo < 1) {
+        $errorEmpresa = "La cantidad de cuotas debe ser como mínimo 1.";
+    } elseif ($cantidadCuotasAcuerdo > 1 && $montoCuotaAcuerdo <= 0) {
+        $errorEmpresa = "Si hay acuerdo, el monto de cada cuota debe ser mayor a 0.";
+    } elseif ($cantidadCuotasAcuerdo > 1 && ($periodoDesdeAcuerdo === "" || $periodoHastaAcuerdo === "")) {
+        $errorEmpresa = "Si hay acuerdo, el período desde y el período hasta son obligatorios.";
+    } elseif ($periodoDesdeAcuerdo !== "" && !periodoValido($periodoDesdeAcuerdo)) {
+        $errorEmpresa = "El período desde debe tener formato MM/AA.";
+    } elseif ($periodoHastaAcuerdo !== "" && !periodoValido($periodoHastaAcuerdo)) {
+        $errorEmpresa = "El período hasta debe tener formato MM/AA.";
+    }
+
+    if ($errorEmpresa === "") {
+        foreach ($empresas as $k => $emp) {
+            if (($emp["id"] ?? "") === $empresaIdAcuerdo) {
+                if (!isset($empresas[$k]["acuerdos"]) || !is_array($empresas[$k]["acuerdos"])) {
+                    $empresas[$k]["acuerdos"] = [];
+                }
+                $empresas[$k]["acuerdos"][$tipoAcuerdo] = [
+                    "monto_total" => $montoTotalAcuerdo,
+                    "cantidad_cuotas" => $cantidadCuotasAcuerdo,
+                    "monto_cuota" => $montoCuotaAcuerdo,
+                    "periodo_desde" => $periodoDesdeAcuerdo,
+                    "periodo_hasta" => $periodoHastaAcuerdo,
+                    "observaciones" => trim($_POST["acuerdo_observaciones"] ?? "")
+                ];
+                break;
+            }
+        }
+
+        guardarJson($empresasFile, $empresas);
+        header("Location: index.php#cargar-acuerdo");
         exit;
     }
 }
@@ -296,15 +372,20 @@ if ($errorEmpresa !== "" && isset($_POST["guardar_empresa"])) {
         "deuda_os" => $_POST["deuda_os"] ?? "",
         "deuda_sindicato" => $_POST["deuda_sindicato"] ?? "",
         "deuda_mutual" => $_POST["deuda_mutual"] ?? "",
-        "monto_total" => $_POST["monto_total"] ?? "",
-        "cantidad_cuotas" => $_POST["cantidad_cuotas"] ?? "1",
-        "monto_cuota" => $_POST["monto_cuota"] ?? "",
-        "periodo_desde" => $_POST["periodo_desde"] ?? "",
-        "periodo_hasta" => $_POST["periodo_hasta"] ?? "",
-        "observaciones_acuerdo" => $_POST["observaciones_acuerdo"] ?? "",
         "observaciones" => $_POST["observaciones_empresa"] ?? ""
     ];
 }
+
+$acuerdoForm = [
+    "empresa_id" => $_POST["acuerdo_empresa_id"] ?? "",
+    "tipo" => $_POST["acuerdo_tipo"] ?? "",
+    "monto_total" => $_POST["acuerdo_monto_total"] ?? "",
+    "cantidad_cuotas" => $_POST["acuerdo_cantidad_cuotas"] ?? "1",
+    "monto_cuota" => $_POST["acuerdo_monto_cuota"] ?? "",
+    "periodo_desde" => $_POST["acuerdo_periodo_desde"] ?? "",
+    "periodo_hasta" => $_POST["acuerdo_periodo_hasta"] ?? "",
+    "observaciones" => $_POST["acuerdo_observaciones"] ?? ""
+];
 
 $editarPago = null;
 if (isset($_GET["editar_pago"])) {
@@ -355,6 +436,7 @@ $totalCobrado = max($totalCobrado, 0);
 $cobradoOS = max($cobradoOS, 0);
 $cobradoSindicato = max($cobradoSindicato, 0);
 $cobradoMutual = max($cobradoMutual, 0);
+$tabInicial = $editarPago ? "cargar-pago" : ($editarEmpresa ? "nueva-empresa" : ((isset($_POST["guardar_acuerdo"]) && $errorEmpresa !== "") ? "cargar-acuerdo" : "inicio"));
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -367,6 +449,18 @@ header{background:#087a46;color:white;padding:18px 25px;display:flex;justify-con
 header h1{margin:0;font-size:24px}
 header a{color:white;text-decoration:none;font-weight:bold}
 main{padding:20px}
+.tabs{display:flex;flex-wrap:wrap;gap:8px;background:white;padding:12px 20px;border-bottom:1px solid #dcefe6;position:sticky;top:0;z-index:5}
+.tab-btn{width:auto;background:#eaf7f0;color:#087a46;border:1px solid #b9dfcc;padding:10px 13px}
+.tab-btn.active{background:#087a46;color:white;border-color:#087a46}
+.tab-panel{display:none}
+.tab-panel.active{display:block}
+.home-actions{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:16px}
+.home-actions button{min-height:64px;font-size:16px}
+.empresa-ficha{background:#f7fbf9;border:1px solid #dcefe6;border-radius:12px;padding:16px;margin:16px 0}
+.empresa-ficha-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.search-results{margin-top:12px}
+.search-result{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px;border-bottom:1px solid #dcefe6}
+.search-result button{width:auto}
 .card{background:white;border-radius:16px;box-shadow:0 5px 18px #0001;padding:20px;margin-bottom:20px}
 .card-header{display:flex;justify-content:space-between;align-items:center;gap:12px}
 .card-header h2{margin:0}
@@ -410,7 +504,7 @@ th{background:#087a46;color:white}
 .saldo-debe{color:#b00020;font-weight:bold}
 .error{color:#b00020;font-weight:bold}
 .fila-oculta{display:none}
-@media(max-width:1000px){.grid,.resumen,.filters-grid,.filters-grid.empresas,.filters-grid.informe,.informe-resumen{grid-template-columns:1fr}table{display:block;overflow-x:auto}}
+@media(max-width:1000px){.grid,.resumen,.home-actions,.empresa-ficha-grid,.filters-grid,.filters-grid.empresas,.filters-grid.informe,.informe-resumen{grid-template-columns:1fr}table{display:block;overflow-x:auto}}
 </style>
 </head>
 <body>
@@ -420,8 +514,19 @@ th{background:#087a46;color:white}
 <a href="?logout=1">Salir</a>
 </header>
 
+<nav class="tabs">
+<button type="button" class="tab-btn active" data-tab="inicio">Inicio</button>
+<button type="button" class="tab-btn" data-tab="buscar-empresa">Buscar empresa</button>
+<button type="button" class="tab-btn" data-tab="cargar-pago">Cargar pago</button>
+<button type="button" class="tab-btn" data-tab="cargar-acuerdo">Cargar acuerdo</button>
+<button type="button" class="tab-btn" data-tab="nueva-empresa">Nueva empresa</button>
+<button type="button" class="tab-btn" data-tab="informe-periodo">Informe período</button>
+<button type="button" class="tab-btn" data-tab="pagos">Pagos registrados</button>
+</nav>
+
 <main>
 
+<section class="tab-panel active" id="tab-inicio">
 <div class="card resumen">
 <div class="box"><div class="label">Total cobrado</div><div class="num"><?= dinero($totalCobrado) ?></div></div>
 <div class="box"><div class="label">Cobrado Obra Social</div><div class="num"><?= dinero($cobradoOS) ?></div></div>
@@ -430,18 +535,25 @@ th{background:#087a46;color:white}
 <div class="box"><div class="label">Pagos registrados</div><div class="num"><?= e($cantidadPagos) ?></div></div>
 </div>
 
-<div class="quick-actions">
-<button type="button" class="quick-link" data-target="informe-periodo">Informe período</button>
-<button type="button" class="quick-link" data-target="empresas">Ver empresas</button>
-<button type="button" class="quick-link" data-target="pagos">Ver pagos</button>
-<button type="button" class="quick-link" data-target="cargar-empresa">Cargar empresa</button>
-<button type="button" class="quick-link" data-target="cargar-pago">Cargar pago</button>
+<div class="card">
+<h2>Inicio</h2>
+<input type="text" id="homeEmpresaSearch" placeholder="Buscar rápido por razón social o CUIT">
+<div id="homeEmpresaResultados" class="search-results"></div>
+<div class="home-actions">
+<button type="button" class="tab-jump" data-tab="buscar-empresa">Buscar empresa</button>
+<button type="button" class="tab-jump" data-tab="cargar-pago">Cargar pago</button>
+<button type="button" class="tab-jump" data-tab="cargar-acuerdo">Cargar acuerdo</button>
+<button type="button" class="tab-jump" data-tab="informe-periodo">Informe período</button>
+<button type="button" class="tab-jump" data-tab="nueva-empresa">Nueva empresa</button>
 </div>
+</div>
+</section>
 
-<div class="card collapsible-card <?= $editarEmpresa ? "" : "is-collapsed" ?>" id="cargar-empresa" data-card="cargar-empresa">
+<section class="tab-panel" id="tab-nueva-empresa">
+<div class="card collapsible-card" id="nueva-empresa" data-card="nueva-empresa">
 <div class="card-header">
-<h2><?= $editarEmpresa ? "Editar empresa" : "Cargar empresa" ?></h2>
-<button type="button" class="toggle-card"><?= $editarEmpresa ? "Minimizar" : "Mostrar" ?></button>
+<h2><?= $editarEmpresa ? "Editar empresa" : "Nueva empresa" ?></h2>
+<button type="button" class="toggle-card">Minimizar</button>
 </div>
 <div class="card-body">
 
@@ -456,16 +568,6 @@ th{background:#087a46;color:white}
 <input type="number" step="0.01" min="0" name="deuda_mutual" placeholder="Deuda Mutual" value="<?= e($editarEmpresa["deuda_mutual"] ?? "") ?>">
 </div>
 
-<h3 class="mini-title">Datos de acuerdo / deuda</h3>
-<div class="grid">
-<input type="number" step="0.01" min="0" name="monto_total" placeholder="Monto total" value="<?= e($editarEmpresa["monto_total"] ?? "") ?>">
-<input type="number" min="1" name="cantidad_cuotas" placeholder="Cantidad de cuotas" value="<?= e($editarEmpresa["cantidad_cuotas"] ?? "1") ?>">
-<input type="number" step="0.01" min="0" name="monto_cuota" placeholder="Monto de cada cuota" value="<?= e($editarEmpresa["monto_cuota"] ?? "") ?>">
-<input type="text" name="periodo_desde" class="periodo-input" placeholder="Período desde MM/AA" maxlength="5" inputmode="numeric" pattern="(0[1-9]|1[0-2])\/[0-9]{2}" value="<?= e(periodoParaInput($editarEmpresa["periodo_desde"] ?? "")) ?>">
-<input type="text" name="periodo_hasta" class="periodo-input" placeholder="Período hasta MM/AA" maxlength="5" inputmode="numeric" pattern="(0[1-9]|1[0-2])\/[0-9]{2}" value="<?= e(periodoParaInput($editarEmpresa["periodo_hasta"] ?? "")) ?>">
-</div>
-
-<textarea name="observaciones_acuerdo" placeholder="Observaciones del acuerdo"><?= e($editarEmpresa["observaciones_acuerdo"] ?? "") ?></textarea>
 <textarea name="observaciones_empresa" placeholder="Observaciones empresa"><?= e($editarEmpresa["observaciones"] ?? "") ?></textarea>
 
 <?php if($errorEmpresa !== ""): ?>
@@ -480,7 +582,9 @@ th{background:#087a46;color:white}
 </form>
 </div>
 </div>
+</section>
 
+<section class="tab-panel" id="tab-cargar-pago">
 <div class="card collapsible-card" id="cargar-pago" data-card="cargar-pago">
 <div class="card-header">
 <h2><?= $editarPago ? "Editar pago" : "Cargar pago" ?></h2>
@@ -553,7 +657,55 @@ Comprobante actual:
 </form>
 </div>
 </div>
+</section>
 
+<section class="tab-panel" id="tab-cargar-acuerdo">
+<div class="card collapsible-card" id="cargar-acuerdo" data-card="cargar-acuerdo">
+<div class="card-header">
+<h2>Cargar acuerdo</h2>
+<button type="button" class="toggle-card">Minimizar</button>
+</div>
+<div class="card-body">
+
+<form method="post" id="acuerdoForm">
+<div class="grid">
+<select name="acuerdo_empresa_id" id="acuerdoEmpresa" required>
+<option value="">Seleccionar empresa</option>
+<?php foreach($empresas as $emp): ?>
+<option value="<?= e($emp["id"]) ?>" <?= (($acuerdoForm["empresa_id"] ?? "") === $emp["id"]) ? "selected" : "" ?>>
+<?= e($emp["razon"]) ?> - <?= e($emp["cuit"]) ?>
+</option>
+<?php endforeach; ?>
+</select>
+
+<select name="acuerdo_tipo" id="acuerdoTipo" required>
+<option value="">Tipo</option>
+<?php foreach(["Obra Social","Sindicato","Mutual"] as $op): ?>
+<option value="<?= e($op) ?>" <?= (($acuerdoForm["tipo"] ?? "") === $op) ? "selected" : "" ?>><?= e($op) ?></option>
+<?php endforeach; ?>
+</select>
+
+<input type="number" step="0.01" min="0" name="acuerdo_monto_total" placeholder="Monto total del acuerdo" value="<?= e($acuerdoForm["monto_total"] ?? "") ?>">
+<input type="number" min="1" name="acuerdo_cantidad_cuotas" placeholder="Cantidad de cuotas" value="<?= e($acuerdoForm["cantidad_cuotas"] ?? "1") ?>">
+<input type="number" step="0.01" min="0" name="acuerdo_monto_cuota" placeholder="Monto de cada cuota" value="<?= e($acuerdoForm["monto_cuota"] ?? "") ?>">
+<input type="text" name="acuerdo_periodo_desde" class="periodo-input" placeholder="Período desde MM/AA" maxlength="5" inputmode="numeric" pattern="(0[1-9]|1[0-2])\/[0-9]{2}" value="<?= e(periodoParaInput($acuerdoForm["periodo_desde"] ?? "")) ?>">
+<input type="text" name="acuerdo_periodo_hasta" class="periodo-input" placeholder="Período hasta MM/AA" maxlength="5" inputmode="numeric" pattern="(0[1-9]|1[0-2])\/[0-9]{2}" value="<?= e(periodoParaInput($acuerdoForm["periodo_hasta"] ?? "")) ?>">
+</div>
+
+<textarea name="acuerdo_observaciones" placeholder="Observaciones del acuerdo"><?= e($acuerdoForm["observaciones"] ?? "") ?></textarea>
+
+<?php if($errorEmpresa !== "" && isset($_POST["guardar_acuerdo"])): ?>
+<p class="error"><?= e($errorEmpresa) ?></p>
+<?php endif; ?>
+
+<br><br>
+<button name="guardar_acuerdo">Guardar acuerdo</button>
+</form>
+</div>
+</div>
+</section>
+
+<section class="tab-panel" id="tab-informe-periodo">
 <div class="card collapsible-card" id="informe-periodo" data-card="informe-periodo">
 <div class="card-header">
 <h2>Informe por período</h2>
@@ -594,10 +746,12 @@ Comprobante actual:
 <th>Cuota esperada</th>
 <th>Monto pagado</th>
 <th>Estado</th>
+<th>Fecha de pago</th>
+<th>Comprobante</th>
 </tr>
 </thead>
 <tbody id="informePagaronBody">
-<tr><td colspan="7" class="sin">Ingresá un período para consultar.</td></tr>
+<tr><td colspan="9" class="sin">Ingresá un período para consultar.</td></tr>
 </tbody>
 </table>
 
@@ -611,23 +765,34 @@ Comprobante actual:
 <th>Plan</th>
 <th>Cuota esperada</th>
 <th>Período acuerdo</th>
+<th>Último pago registrado</th>
 <th>Estado</th>
 <th>Acciones</th>
 </tr>
 </thead>
 <tbody id="informeNoPagaronBody">
-<tr><td colspan="8" class="sin">Ingresá un período para consultar.</td></tr>
+<tr><td colspan="9" class="sin">Ingresá un período para consultar.</td></tr>
 </tbody>
 </table>
 </div>
 </div>
+</section>
 
+<section class="tab-panel" id="tab-buscar-empresa">
 <div class="card collapsible-card" id="empresas" data-card="empresas">
 <div class="card-header">
-<h2>Empresas registradas</h2>
+<h2>Buscar empresa</h2>
 <button type="button" class="toggle-card">Minimizar</button>
 </div>
 <div class="card-body">
+
+<div class="filters">
+<input type="text" id="buscadorFichaEmpresa" placeholder="Buscar por razón social o CUIT">
+<div id="resultadosFichaEmpresa" class="search-results"></div>
+</div>
+<div id="fichaEmpresa" class="empresa-ficha">
+<span class="sin">Buscá y seleccioná una empresa para ver su ficha.</span>
+</div>
 
 <div class="filters">
 <div class="filters-grid empresas">
@@ -682,11 +847,19 @@ Comprobante actual:
 $deudaOS = floatval($emp["deuda_os"] ?? 0);
 $deudaSind = floatval($emp["deuda_sindicato"] ?? 0);
 $deudaMutual = floatval($emp["deuda_mutual"] ?? 0);
-$montoTotalEmpresa = floatval($emp["monto_total"] ?? 0);
-$cantidadCuotasEmpresa = max(intval($emp["cantidad_cuotas"] ?? 1), 1);
-$montoCuotaEmpresa = floatval($emp["monto_cuota"] ?? 0);
-$periodoDesdeEmpresa = periodoParaInput($emp["periodo_desde"] ?? "");
-$periodoHastaEmpresa = periodoParaInput($emp["periodo_hasta"] ?? "");
+$acuerdoTabla = acuerdoDefault();
+foreach (["Obra Social","Sindicato","Mutual"] as $tipoAcuerdoTabla) {
+    $tmpAcuerdo = acuerdoEmpresa($emp, $tipoAcuerdoTabla);
+    if (floatval($tmpAcuerdo["monto_total"] ?? 0) > 0 || floatval($tmpAcuerdo["monto_cuota"] ?? 0) > 0) {
+        $acuerdoTabla = $tmpAcuerdo;
+        break;
+    }
+}
+$montoTotalEmpresa = floatval($acuerdoTabla["monto_total"] ?? 0);
+$cantidadCuotasEmpresa = max(intval($acuerdoTabla["cantidad_cuotas"] ?? 1), 1);
+$montoCuotaEmpresa = floatval($acuerdoTabla["monto_cuota"] ?? 0);
+$periodoDesdeEmpresa = periodoParaInput($acuerdoTabla["periodo_desde"] ?? "");
+$periodoHastaEmpresa = periodoParaInput($acuerdoTabla["periodo_hasta"] ?? "");
 $esAcuerdoEmpresa = $cantidadCuotasEmpresa > 1;
 $planEmpresa = $esAcuerdoEmpresa ? "Acuerdo" : "Pago único";
 $planFiltroEmpresa = $esAcuerdoEmpresa ? "acuerdo" : "pago-unico";
@@ -737,11 +910,13 @@ $categoriaMutual = ($deudaMutual > 0 || $pagadoMutual > 0) ? "1" : "0";
 </table>
 </div>
 </div>
+</section>
 
-<div class="card collapsible-card is-collapsed" id="pagos" data-card="pagos">
+<section class="tab-panel" id="tab-pagos">
+<div class="card collapsible-card" id="pagos" data-card="pagos">
 <div class="card-header">
 <h2>Pagos registrados</h2>
-<button type="button" class="toggle-card">Mostrar</button>
+<button type="button" class="toggle-card">Minimizar</button>
 </div>
 <div class="card-body">
 
@@ -816,12 +991,14 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 </table>
 </div>
 </div>
+</section>
 
 </main>
 <script>
 const empresasData = <?= json_encode($empresas, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>;
 const pagosData = <?= json_encode($pagos, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>;
 const tiposInforme = ["Obra Social", "Sindicato", "Mutual"];
+const tabInicial = <?= json_encode($tabInicial, JSON_UNESCAPED_UNICODE) ?>;
 
 function formatearPeriodo(valor) {
     const numeros = (valor || "").replace(/\D/g, "").slice(0, 4);
@@ -842,30 +1019,44 @@ document.querySelectorAll(".periodo-input").forEach((input) => {
 const empresaForm = document.querySelector('form:not([enctype])');
 if (empresaForm) {
     empresaForm.addEventListener("submit", (event) => {
-        const montoTotal = Number(empresaForm.querySelector('input[name="monto_total"]')?.value || 0);
-        const cantidadCuotas = Number(empresaForm.querySelector('input[name="cantidad_cuotas"]')?.value || 1);
-        const montoCuota = Number(empresaForm.querySelector('input[name="monto_cuota"]')?.value || 0);
-        const periodoDesde = empresaForm.querySelector('input[name="periodo_desde"]');
-        const periodoHasta = empresaForm.querySelector('input[name="periodo_hasta"]');
+        ["deuda_os", "deuda_sindicato", "deuda_mutual"].forEach((campo) => {
+            const input = empresaForm.querySelector(`input[name="${campo}"]`);
+            if (input && Number(input.value || 0) < 0) {
+                event.preventDefault();
+                alert("Las deudas no pueden ser negativas.");
+                input.focus();
+            }
+        });
+    });
+}
+
+const acuerdoFormEl = document.getElementById("acuerdoForm");
+if (acuerdoFormEl) {
+    acuerdoFormEl.addEventListener("submit", (event) => {
+        const montoTotal = Number(acuerdoFormEl.querySelector('input[name="acuerdo_monto_total"]')?.value || 0);
+        const cantidadCuotas = Number(acuerdoFormEl.querySelector('input[name="acuerdo_cantidad_cuotas"]')?.value || 1);
+        const montoCuota = Number(acuerdoFormEl.querySelector('input[name="acuerdo_monto_cuota"]')?.value || 0);
+        const periodoDesde = acuerdoFormEl.querySelector('input[name="acuerdo_periodo_desde"]');
+        const periodoHasta = acuerdoFormEl.querySelector('input[name="acuerdo_periodo_hasta"]');
 
         if (montoTotal < 0) {
             event.preventDefault();
-            alert("El monto total no puede ser negativo.");
-            empresaForm.querySelector('input[name="monto_total"]')?.focus();
+            alert("El monto total del acuerdo no puede ser negativo.");
+            acuerdoFormEl.querySelector('input[name="acuerdo_monto_total"]')?.focus();
             return;
         }
 
         if (cantidadCuotas < 1) {
             event.preventDefault();
             alert("La cantidad de cuotas debe ser como mínimo 1.");
-            empresaForm.querySelector('input[name="cantidad_cuotas"]')?.focus();
+            acuerdoFormEl.querySelector('input[name="acuerdo_cantidad_cuotas"]')?.focus();
             return;
         }
 
         if (cantidadCuotas > 1 && montoCuota <= 0) {
             event.preventDefault();
             alert("Si hay acuerdo, el monto de cada cuota debe ser mayor a 0.");
-            empresaForm.querySelector('input[name="monto_cuota"]')?.focus();
+            acuerdoFormEl.querySelector('input[name="acuerdo_monto_cuota"]')?.focus();
             return;
         }
 
@@ -940,43 +1131,70 @@ function periodoAIndice(periodo) {
     return (2000 + anio) * 12 + mes;
 }
 
-function planEmpresa(empresa) {
-    const cantidad = Math.max(Number(empresa.cantidad_cuotas || 1), 1);
+function acuerdoEmpresaTipo(empresa, tipo) {
+    const base = {
+        monto_total: 0,
+        cantidad_cuotas: 1,
+        monto_cuota: 0,
+        periodo_desde: "",
+        periodo_hasta: "",
+        observaciones: ""
+    };
+    if (empresa?.acuerdos && empresa.acuerdos[tipo]) {
+        return { ...base, ...empresa.acuerdos[tipo] };
+    }
+    return {
+        ...base,
+        monto_total: empresa?.monto_total || 0,
+        cantidad_cuotas: empresa?.cantidad_cuotas || 1,
+        monto_cuota: empresa?.monto_cuota || 0,
+        periodo_desde: empresa?.periodo_desde || "",
+        periodo_hasta: empresa?.periodo_hasta || "",
+        observaciones: empresa?.observaciones_acuerdo || ""
+    };
+}
+
+function planEmpresa(empresa, tipo = "Obra Social") {
+    const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
+    const cantidad = Math.max(Number(acuerdo.cantidad_cuotas || 1), 1);
     return cantidad > 1 ? "Acuerdo" : "Pago único";
 }
 
-function periodoAcuerdoEmpresa(empresa) {
-    const desde = periodoNormalizado(empresa.periodo_desde || "");
-    const hasta = periodoNormalizado(empresa.periodo_hasta || "");
+function periodoAcuerdoEmpresa(empresa, tipo = "Obra Social") {
+    const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
+    const desde = periodoNormalizado(acuerdo.periodo_desde || "");
+    const hasta = periodoNormalizado(acuerdo.periodo_hasta || "");
     if (desde && hasta && desde !== hasta) return `${desde} a ${hasta}`;
     return desde || hasta || "";
 }
 
-function tieneDatosAcuerdo(empresa) {
-    return Number(empresa.monto_total || 0) > 0 ||
-        Number(empresa.monto_cuota || 0) > 0 ||
-        Number(empresa.cantidad_cuotas || 0) > 0 ||
-        !!periodoNormalizado(empresa.periodo_desde || "") ||
-        !!periodoNormalizado(empresa.periodo_hasta || "");
+function tieneDatosAcuerdo(empresa, tipo = "Obra Social") {
+    const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
+    return Number(acuerdo.monto_total || 0) > 0 ||
+        Number(acuerdo.monto_cuota || 0) > 0 ||
+        Number(acuerdo.cantidad_cuotas || 0) > 0 ||
+        !!periodoNormalizado(acuerdo.periodo_desde || "") ||
+        !!periodoNormalizado(acuerdo.periodo_hasta || "");
 }
 
-function cuotaEsperadaEmpresaPeriodo(empresa, periodo) {
-    const cantidad = Math.max(Number(empresa.cantidad_cuotas || 1), 1);
+function cuotaEsperadaEmpresaPeriodo(empresa, periodo, tipo = "Obra Social") {
+    const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
+    const cantidad = Math.max(Number(acuerdo.cantidad_cuotas || 1), 1);
     const consultado = periodoAIndice(periodo);
-    const desde = periodoAIndice(empresa.periodo_desde || "");
-    const hasta = periodoAIndice(empresa.periodo_hasta || "");
+    const desde = periodoAIndice(acuerdo.periodo_desde || "");
+    const hasta = periodoAIndice(acuerdo.periodo_hasta || "");
     if (consultado === null) return 0;
 
     if (cantidad <= 1) {
         const periodoUnico = desde ?? hasta;
         if (periodoUnico !== null && consultado === periodoUnico) {
-            return Math.max(Number(empresa.monto_total || empresa.monto_cuota || 0), 0);
+            return Math.max(Number(acuerdo.monto_total || acuerdo.monto_cuota || 0), 0);
         }
         return 0;
     }
 
     if (desde !== null && hasta !== null && consultado >= desde && consultado <= hasta) {
-        return Math.max(Number(empresa.monto_cuota || 0), 0);
+        return Math.max(Number(acuerdo.monto_cuota || 0), 0);
     }
 
     return 0;
@@ -984,6 +1202,15 @@ function cuotaEsperadaEmpresaPeriodo(empresa, periodo) {
 
 function obtenerEmpresa(id) {
     return empresasData.find((empresa) => (empresa.id || "") === (id || "")) || null;
+}
+
+function activarTab(tabId) {
+    document.querySelectorAll(".tab-btn").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.tab === tabId);
+    });
+    document.querySelectorAll(".tab-panel").forEach((panel) => {
+        panel.classList.toggle("active", panel.id === "tab-" + tabId);
+    });
 }
 
 function actualizarBotonCard(card) {
@@ -1011,15 +1238,14 @@ function configurarCardsPlegables() {
         }
     });
 
-    document.querySelectorAll(".quick-link").forEach((boton) => {
-        boton.addEventListener("click", () => {
-            const card = document.getElementById(boton.dataset.target);
-            abrirCard(card);
-            if (card) {
-                card.scrollIntoView({ behavior: "smooth", block: "start" });
-            }
-        });
+}
+
+function configurarTabs() {
+    document.querySelectorAll(".tab-btn, .tab-jump").forEach((boton) => {
+        boton.addEventListener("click", () => activarTab(boton.dataset.tab));
     });
+    const hashTab = window.location.hash ? window.location.hash.replace("#", "") : "";
+    activarTab(hashTab && document.getElementById("tab-" + hashTab) ? hashTab : tabInicial);
 }
 
 function configurarFiltrosEmpresas() {
@@ -1106,7 +1332,86 @@ function empresaObligadaPorTipo(empresa, tipo) {
         (pago.empresa_id || "") === (empresa.id || "") && (pago.tipo || "") === tipo
     );
 
-    return tieneDeuda || tienePagoHistorico;
+    return tieneDeuda || tienePagoHistorico || tieneDatosAcuerdo(empresa, tipo);
+}
+
+function totalPagadoCliente(empresaId, tipo) {
+    return pagosData.reduce((total, pago) => {
+        if ((pago.empresa_id || "") === empresaId && (pago.tipo || "") === tipo) {
+            return total + (Number(pago.monto) || 0);
+        }
+        return total;
+    }, 0);
+}
+
+function renderAcuerdoResumen(empresa, tipo) {
+    const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
+    if (!tieneDatosAcuerdo(empresa, tipo) || (Number(acuerdo.monto_total || 0) <= 0 && Number(acuerdo.monto_cuota || 0) <= 0)) {
+        return `${tipo}: Sin acuerdo cargado`;
+    }
+
+    const cuotas = Math.max(Number(acuerdo.cantidad_cuotas || 1), 1);
+    const plan = cuotas > 1 ? "Acuerdo" : "Pago único";
+    const detalle = cuotas > 1 ? `${cuotas} x ${dineroCliente(acuerdo.monto_cuota)}` : dineroCliente(acuerdo.monto_total || acuerdo.monto_cuota);
+    const periodo = periodoAcuerdoEmpresa(empresa, tipo);
+    return `${tipo}: ${plan} ${detalle}${periodo ? " (" + periodo + ")" : ""}`;
+}
+
+function seleccionarEmpresaFicha(empresaId) {
+    const empresa = obtenerEmpresa(empresaId);
+    const ficha = document.getElementById("fichaEmpresa");
+    if (!empresa || !ficha) return;
+
+    const saldos = tiposInforme.map((tipo) => {
+        const deudaCampo = {"Obra Social":"deuda_os","Sindicato":"deuda_sindicato","Mutual":"deuda_mutual"}[tipo];
+        const deuda = Number(empresa[deudaCampo] || 0);
+        const cobrado = totalPagadoCliente(empresa.id || "", tipo);
+        const saldo = Math.max(deuda - cobrado, 0);
+        return { tipo, deuda, cobrado, saldo };
+    });
+
+    const pagosEmpresa = pagosData.filter((pago) => (pago.empresa_id || "") === (empresa.id || ""));
+    ficha.innerHTML = `
+<h3>${escapeHtml(empresa.razon || "")}</h3>
+<p><strong>CUIT:</strong> ${escapeHtml(empresa.cuit || "")}</p>
+<div class="empresa-ficha-grid">
+${saldos.map((s) => `<div class="box"><div class="label">${escapeHtml(s.tipo)}</div><div>Deuda: ${dineroCliente(s.deuda)}</div><div>Cobrado: ${dineroCliente(s.cobrado)}</div><div>Saldo: ${dineroCliente(s.saldo)}</div></div>`).join("")}
+</div>
+<h3 class="mini-title">Acuerdos vigentes</h3>
+<p>${tiposInforme.map((tipo) => escapeHtml(renderAcuerdoResumen(empresa, tipo))).join("<br>")}</p>
+<h3 class="mini-title">Pagos registrados</h3>
+${pagosEmpresa.length ? `<table><thead><tr><th>Fecha</th><th>Tipo</th><th>Período</th><th>Monto</th><th>Forma</th></tr></thead><tbody>${pagosEmpresa.map((pago) => `<tr><td>${escapeHtml(pago.fecha || "")}</td><td>${escapeHtml(pago.tipo || "")}</td><td>${escapeHtml(periodoNormalizado(pago.periodo || ""))}</td><td>${dineroCliente(pago.monto)}</td><td>${escapeHtml(pago.forma_pago || "")}</td></tr>`).join("")}</tbody></table>` : '<p class="sin">Sin pagos registrados.</p>'}
+<br>
+<a class="btn-secundario" href="?editar_empresa=${encodeURIComponent(empresa.id || "")}">Editar empresa</a>
+<button type="button" class="btn-small ficha-cargar-pago" data-empresa="${escapeHtml(empresa.id || "")}">Cargar pago</button>
+<button type="button" class="btn-small ficha-cargar-acuerdo" data-empresa="${escapeHtml(empresa.id || "")}">Cargar acuerdo</button>
+`;
+
+    ficha.querySelector(".ficha-cargar-pago")?.addEventListener("click", () => completarFormularioPago(empresa.id || "", "", ""));
+    ficha.querySelector(".ficha-cargar-acuerdo")?.addEventListener("click", () => completarFormularioAcuerdo(empresa.id || "", ""));
+}
+
+function renderResultadosEmpresa(input, contenedor, limite = 12) {
+    const texto = textoNormalizado(input.value);
+    if (!texto) {
+        contenedor.innerHTML = "";
+        return;
+    }
+
+    const resultados = empresasData
+        .filter((empresa) => textoNormalizado((empresa.razon || "") + " " + (empresa.cuit || "")).includes(texto))
+        .slice(0, limite);
+
+    contenedor.innerHTML = resultados.length
+        ? resultados.map((empresa) => `<div class="search-result"><span>${escapeHtml(empresa.razon || "")} - ${escapeHtml(empresa.cuit || "")}</span><button type="button" data-empresa="${escapeHtml(empresa.id || "")}">Ver ficha</button></div>`).join("")
+        : '<p class="sin">Sin coincidencias.</p>';
+
+    contenedor.querySelectorAll("button[data-empresa]").forEach((boton) => {
+        boton.addEventListener("click", () => {
+            activarTab("buscar-empresa");
+            seleccionarEmpresaFicha(boton.dataset.empresa);
+        });
+    });
 }
 
 function ultimoPagoEmpresaTipo(empresaId, tipo) {
@@ -1122,6 +1427,7 @@ function ultimoPagoEmpresaTipo(empresaId, tipo) {
 }
 
 function completarFormularioPago(empresaId, tipo, periodo) {
+    activarTab("cargar-pago");
     const card = document.getElementById("cargar-pago");
     abrirCard(card);
 
@@ -1146,9 +1452,41 @@ function completarFormularioPago(empresaId, tipo, periodo) {
         if (monto) monto.focus();
     }
 
-    if (card) {
-        card.scrollIntoView({ behavior: "smooth", block: "start" });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function completarFormularioAcuerdo(empresaId, tipo) {
+    activarTab("cargar-acuerdo");
+    const card = document.getElementById("cargar-acuerdo");
+    abrirCard(card);
+
+    const form = document.getElementById("acuerdoForm");
+    if (form) {
+        const empresa = form.querySelector('select[name="acuerdo_empresa_id"]');
+        const tipoInput = form.querySelector('select[name="acuerdo_tipo"]');
+        if (empresa) empresa.value = empresaId;
+        if (tipoInput && tipo) tipoInput.value = tipo;
+        cargarAcuerdoExistente();
     }
+
+    window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function cargarAcuerdoExistente() {
+    const form = document.getElementById("acuerdoForm");
+    if (!form) return;
+    const empresaId = form.querySelector('select[name="acuerdo_empresa_id"]')?.value || "";
+    const tipo = form.querySelector('select[name="acuerdo_tipo"]')?.value || "";
+    const empresa = obtenerEmpresa(empresaId);
+    if (!empresa || !tipo) return;
+
+    const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
+    form.querySelector('input[name="acuerdo_monto_total"]').value = acuerdo.monto_total || "";
+    form.querySelector('input[name="acuerdo_cantidad_cuotas"]').value = acuerdo.cantidad_cuotas || "1";
+    form.querySelector('input[name="acuerdo_monto_cuota"]').value = acuerdo.monto_cuota || "";
+    form.querySelector('input[name="acuerdo_periodo_desde"]').value = periodoNormalizado(acuerdo.periodo_desde || "");
+    form.querySelector('input[name="acuerdo_periodo_hasta"]').value = periodoNormalizado(acuerdo.periodo_hasta || "");
+    form.querySelector('textarea[name="acuerdo_observaciones"]').value = acuerdo.observaciones || "";
 }
 
 function configurarInformePeriodo() {
@@ -1177,8 +1515,8 @@ function configurarInformePeriodo() {
             pagaronEl.textContent = "0";
             noPagaronEl.textContent = "0";
             periodoEl.textContent = "--";
-            pagaronBody.innerHTML = '<tr><td colspan="7" class="sin">Ingresá un período MM/AA para consultar.</td></tr>';
-            noPagaronBody.innerHTML = '<tr><td colspan="8" class="sin">Ingresá un período MM/AA para consultar.</td></tr>';
+            pagaronBody.innerHTML = '<tr><td colspan="9" class="sin">Ingresá un período MM/AA para consultar.</td></tr>';
+            noPagaronBody.innerHTML = '<tr><td colspan="9" class="sin">Ingresá un período MM/AA para consultar.</td></tr>';
             return;
         }
 
@@ -1192,9 +1530,13 @@ function configurarInformePeriodo() {
             const actual = pagosAgrupados.get(clave) || {
                 empresaId: pago.empresa_id || "",
                 tipo: pago.tipo || "",
-                monto: 0
+                monto: 0,
+                fechas: [],
+                comprobantes: []
             };
             actual.monto += Number(pago.monto) || 0;
+            if (pago.fecha) actual.fechas.push(pago.fecha);
+            if (pago.comprobante) actual.comprobantes.push(pago.comprobante);
             pagosAgrupados.set(clave, actual);
         });
 
@@ -1207,10 +1549,10 @@ function configurarInformePeriodo() {
                 if (!empresaObligadaPorTipo(empresa, tipo)) return;
 
                 const clave = (empresa.id || "") + "|" + tipo;
-                const esperadoPorAcuerdo = cuotaEsperadaEmpresaPeriodo(empresa, periodo);
-                const usaAcuerdo = tieneDatosAcuerdo(empresa);
+                const esperadoPorAcuerdo = cuotaEsperadaEmpresaPeriodo(empresa, periodo, tipo);
+                const usaAcuerdo = tieneDatosAcuerdo(empresa, tipo);
                 const pago = pagosAgrupados.get(clave);
-                const aplicaEnPeriodo = esperadoPorAcuerdo > 0 || (!usaAcuerdo && pago);
+                const aplicaEnPeriodo = esperadoPorAcuerdo > 0 || !usaAcuerdo || pago;
 
                 if (!aplicaEnPeriodo) return;
 
@@ -1221,13 +1563,15 @@ function configurarInformePeriodo() {
                     filasPagaron.push({
                         empresa,
                         tipo,
-                        plan: planEmpresa(empresa),
+                        plan: planEmpresa(empresa, tipo),
                         esperado,
                         pagado: pago.monto,
-                        estado: pago.monto >= esperado ? "AL DÍA" : "PARCIAL"
+                        fechas: pago.fechas,
+                        comprobantes: pago.comprobantes,
+                        estado: esperado <= 0 ? "EXTRA" : (pago.monto >= esperado ? "AL DÍA" : "PARCIAL")
                     });
                 } else {
-                    deudores.push({ empresa, tipo, plan: planEmpresa(empresa), esperado });
+                    deudores.push({ empresa, tipo, plan: planEmpresa(empresa, tipo), esperado });
                 }
             });
         });
@@ -1238,10 +1582,12 @@ function configurarInformePeriodo() {
             filasPagaron.push({
                 empresa,
                 tipo: pago.tipo,
-                plan: empresa ? planEmpresa(empresa) : "",
-                esperado: empresa ? cuotaEsperadaEmpresaPeriodo(empresa, periodo) : 0,
+                plan: empresa ? planEmpresa(empresa, pago.tipo) : "",
+                esperado: empresa ? cuotaEsperadaEmpresaPeriodo(empresa, periodo, pago.tipo) : 0,
                 pagado: pago.monto,
-                estado: "AL DÍA"
+                fechas: pago.fechas,
+                comprobantes: pago.comprobantes,
+                estado: empresa && cuotaEsperadaEmpresaPeriodo(empresa, periodo, pago.tipo) > 0 ? "AL DÍA" : "EXTRA"
             });
         });
 
@@ -1258,10 +1604,13 @@ function configurarInformePeriodo() {
         periodoEl.textContent = periodo;
 
         if (filasPagaron.length === 0) {
-            pagaronBody.innerHTML = '<tr><td colspan="7" class="sin">No hay pagos registrados para este período y tipo.</td></tr>';
+            pagaronBody.innerHTML = '<tr><td colspan="9" class="sin">No hay pagos registrados para este período y tipo.</td></tr>';
         } else {
             pagaronBody.innerHTML = filasPagaron.map((fila) => {
-                const estadoClase = fila.estado === "AL DÍA" ? "estado-ok" : "estado-parcial";
+                const estadoClase = fila.estado === "AL DÍA" ? "estado-ok" : (fila.estado === "EXTRA" ? "estado-ok" : "estado-parcial");
+                const comprobantes = (fila.comprobantes || []).length
+                    ? fila.comprobantes.map((comp, index) => `<a href="${escapeHtml(comp)}" target="_blank" title="Ver">👁️</a> <a href="${escapeHtml(comp)}" download title="Descargar">⬇️</a>${index < fila.comprobantes.length - 1 ? " " : ""}`).join("")
+                    : '<span class="sin">Sin comprobante</span>';
 
                 return `<tr>
 <td>${escapeHtml(fila.empresa ? fila.empresa.razon : "Empresa eliminada")}</td>
@@ -1271,21 +1620,28 @@ function configurarInformePeriodo() {
 <td>${dineroCliente(fila.esperado)}</td>
 <td>${dineroCliente(fila.pagado)}</td>
 <td><span class="estado ${estadoClase}">${escapeHtml(fila.estado)}</span></td>
+<td>${escapeHtml((fila.fechas || []).join(", "))}</td>
+<td>${comprobantes}</td>
 </tr>`;
             }).join("");
         }
 
         if (deudores.length === 0) {
-            noPagaronBody.innerHTML = '<tr><td colspan="8" class="sin">No hay empresas pendientes para este período y tipo.</td></tr>';
+            noPagaronBody.innerHTML = '<tr><td colspan="9" class="sin">No hay empresas pendientes para este período y tipo.</td></tr>';
         } else {
             noPagaronBody.innerHTML = deudores.map(({ empresa, tipo, plan, esperado }) => {
+                const ultimoPago = ultimoPagoEmpresaTipo(empresa.id || "", tipo);
+                const ultimo = ultimoPago
+                    ? `${escapeHtml(periodoNormalizado(ultimoPago.periodo))} - ${escapeHtml(ultimoPago.fecha || "")} - ${dineroCliente(ultimoPago.monto)}`
+                    : '<span class="sin">Sin pagos previos</span>';
                 return `<tr>
 <td>${escapeHtml(empresa.razon || "")}</td>
 <td>${escapeHtml(empresa.cuit || "")}</td>
 <td><span class="badge">${escapeHtml(tipo)}</span></td>
 <td>${escapeHtml(plan)}</td>
 <td>${dineroCliente(esperado)}</td>
-<td>${escapeHtml(periodoAcuerdoEmpresa(empresa) || periodo)}</td>
+<td>${escapeHtml(periodoAcuerdoEmpresa(empresa, tipo) || periodo)}</td>
+<td>${ultimo}</td>
 <td><span class="estado estado-deudor">DEUDOR</span></td>
 <td><button type="button" class="btn-small cargar-pago-informe" data-empresa="${escapeHtml(empresa.id || "")}" data-tipo="${escapeHtml(tipo)}" data-periodo="${escapeHtml(periodo)}">Cargar pago</button></td>
 </tr>`;
@@ -1306,7 +1662,28 @@ function configurarInformePeriodo() {
     tipoInput.addEventListener("change", render);
 }
 
+function configurarBuscadoresEmpresa() {
+    const homeInput = document.getElementById("homeEmpresaSearch");
+    const homeResultados = document.getElementById("homeEmpresaResultados");
+    const fichaInput = document.getElementById("buscadorFichaEmpresa");
+    const fichaResultados = document.getElementById("resultadosFichaEmpresa");
+
+    if (homeInput && homeResultados) {
+        homeInput.addEventListener("input", () => renderResultadosEmpresa(homeInput, homeResultados, 6));
+    }
+    if (fichaInput && fichaResultados) {
+        fichaInput.addEventListener("input", () => renderResultadosEmpresa(fichaInput, fichaResultados, 20));
+    }
+
+    const acuerdoEmpresa = document.getElementById("acuerdoEmpresa");
+    const acuerdoTipo = document.getElementById("acuerdoTipo");
+    if (acuerdoEmpresa) acuerdoEmpresa.addEventListener("change", cargarAcuerdoExistente);
+    if (acuerdoTipo) acuerdoTipo.addEventListener("change", cargarAcuerdoExistente);
+}
+
+configurarTabs();
 configurarCardsPlegables();
+configurarBuscadoresEmpresa();
 configurarInformePeriodo();
 configurarFiltrosEmpresas();
 configurarFiltrosPagos();
