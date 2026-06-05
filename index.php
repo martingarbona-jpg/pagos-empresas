@@ -127,10 +127,30 @@ button{background:#087a46;color:white;border:0;font-weight:bold;cursor:pointer}
 
 $empresas = leerJson($empresasFile);
 $pagos = leerJson($pagosFile);
+$errorEmpresa = "";
 $errorPago = "";
 
 if (isset($_POST["guardar_empresa"])) {
     $id = $_POST["empresa_id"] ?: uniqid("emp_");
+    $montoTotal = floatval($_POST["monto_total"] ?? 0);
+    $cantidadCuotas = intval($_POST["cantidad_cuotas"] ?? 1);
+    $montoCuota = floatval($_POST["monto_cuota"] ?? 0);
+    $periodoDesde = trim($_POST["periodo_desde"] ?? "");
+    $periodoHasta = trim($_POST["periodo_hasta"] ?? "");
+
+    if ($montoTotal < 0) {
+        $errorEmpresa = "El monto total no puede ser negativo.";
+    } elseif ($cantidadCuotas < 1) {
+        $errorEmpresa = "La cantidad de cuotas debe ser como mínimo 1.";
+    } elseif ($cantidadCuotas > 1 && $montoCuota <= 0) {
+        $errorEmpresa = "Si hay acuerdo, el monto de cada cuota debe ser mayor a 0.";
+    } elseif ($cantidadCuotas > 1 && ($periodoDesde === "" || $periodoHasta === "")) {
+        $errorEmpresa = "Si hay acuerdo, el período desde y el período hasta son obligatorios.";
+    } elseif ($periodoDesde !== "" && !periodoValido($periodoDesde)) {
+        $errorEmpresa = "El período desde debe tener formato MM/AA.";
+    } elseif ($periodoHasta !== "" && !periodoValido($periodoHasta)) {
+        $errorEmpresa = "El período hasta debe tener formato MM/AA.";
+    }
 
     $nueva = [
         "id" => $id,
@@ -139,25 +159,33 @@ if (isset($_POST["guardar_empresa"])) {
         "deuda_os" => floatval($_POST["deuda_os"] ?? 0),
         "deuda_sindicato" => floatval($_POST["deuda_sindicato"] ?? 0),
         "deuda_mutual" => floatval($_POST["deuda_mutual"] ?? 0),
+        "monto_total" => $montoTotal,
+        "cantidad_cuotas" => $cantidadCuotas,
+        "monto_cuota" => $montoCuota,
+        "periodo_desde" => $periodoDesde,
+        "periodo_hasta" => $periodoHasta,
+        "observaciones_acuerdo" => trim($_POST["observaciones_acuerdo"] ?? ""),
         "observaciones" => trim($_POST["observaciones_empresa"] ?? ""),
         "fecha_carga" => date("Y-m-d H:i:s")
     ];
 
-    $editado = false;
-    foreach ($empresas as $k => $emp) {
-        if (($emp["id"] ?? "") === $id) {
-            $nueva["fecha_carga"] = $emp["fecha_carga"] ?? date("Y-m-d H:i:s");
-            $empresas[$k] = $nueva;
-            $editado = true;
-            break;
+    if ($errorEmpresa === "") {
+        $editado = false;
+        foreach ($empresas as $k => $emp) {
+            if (($emp["id"] ?? "") === $id) {
+                $nueva["fecha_carga"] = $emp["fecha_carga"] ?? date("Y-m-d H:i:s");
+                $empresas[$k] = $nueva;
+                $editado = true;
+                break;
+            }
         }
+
+        if (!$editado) $empresas[] = $nueva;
+
+        guardarJson($empresasFile, $empresas);
+        header("Location: index.php");
+        exit;
     }
-
-    if (!$editado) $empresas[] = $nueva;
-
-    guardarJson($empresasFile, $empresas);
-    header("Location: index.php");
-    exit;
 }
 
 if (isset($_POST["guardar_pago"])) {
@@ -260,6 +288,24 @@ if (isset($_GET["editar_empresa"])) {
     $editarEmpresa = buscarEmpresa($empresas, $_GET["editar_empresa"]);
 }
 
+if ($errorEmpresa !== "" && isset($_POST["guardar_empresa"])) {
+    $editarEmpresa = [
+        "id" => $_POST["empresa_id"] ?? "",
+        "razon" => $_POST["razon"] ?? "",
+        "cuit" => $_POST["cuit"] ?? "",
+        "deuda_os" => $_POST["deuda_os"] ?? "",
+        "deuda_sindicato" => $_POST["deuda_sindicato"] ?? "",
+        "deuda_mutual" => $_POST["deuda_mutual"] ?? "",
+        "monto_total" => $_POST["monto_total"] ?? "",
+        "cantidad_cuotas" => $_POST["cantidad_cuotas"] ?? "1",
+        "monto_cuota" => $_POST["monto_cuota"] ?? "",
+        "periodo_desde" => $_POST["periodo_desde"] ?? "",
+        "periodo_hasta" => $_POST["periodo_hasta"] ?? "",
+        "observaciones_acuerdo" => $_POST["observaciones_acuerdo"] ?? "",
+        "observaciones" => $_POST["observaciones_empresa"] ?? ""
+    ];
+}
+
 $editarPago = null;
 if (isset($_GET["editar_pago"])) {
     foreach ($pagos as $p) {
@@ -342,7 +388,7 @@ button{background:#087a46;color:white;border:0;font-weight:bold;cursor:pointer}
 .btn-danger{display:inline-block;background:#b00020;color:white;border:0;padding:9px 12px;border-radius:8px;text-decoration:none;font-weight:bold}
 .filters{background:#f7fbf9;border:1px solid #dcefe6;border-radius:12px;padding:14px;margin:12px 0 16px}
 .filters-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto;gap:10px;align-items:center}
-.filters-grid.empresas{grid-template-columns:1.2fr 2fr 1fr auto}
+.filters-grid.empresas{grid-template-columns:1.2fr 1.2fr 2fr 1fr auto}
 .filters-grid.informe{grid-template-columns:1fr 1fr auto}
 .filters input,.filters select{width:100%;background:white}
 .filters button{white-space:nowrap}
@@ -406,7 +452,21 @@ th{background:#087a46;color:white}
 <input type="number" step="0.01" min="0" name="deuda_mutual" placeholder="Deuda Mutual" value="<?= e($editarEmpresa["deuda_mutual"] ?? "") ?>">
 </div>
 
+<h3 class="mini-title">Datos de acuerdo / deuda</h3>
+<div class="grid">
+<input type="number" step="0.01" min="0" name="monto_total" placeholder="Monto total" value="<?= e($editarEmpresa["monto_total"] ?? "") ?>">
+<input type="number" min="1" name="cantidad_cuotas" placeholder="Cantidad de cuotas" value="<?= e($editarEmpresa["cantidad_cuotas"] ?? "1") ?>">
+<input type="number" step="0.01" min="0" name="monto_cuota" placeholder="Monto de cada cuota" value="<?= e($editarEmpresa["monto_cuota"] ?? "") ?>">
+<input type="text" name="periodo_desde" class="periodo-input" placeholder="Período desde MM/AA" maxlength="5" inputmode="numeric" pattern="(0[1-9]|1[0-2])\/[0-9]{2}" value="<?= e(periodoParaInput($editarEmpresa["periodo_desde"] ?? "")) ?>">
+<input type="text" name="periodo_hasta" class="periodo-input" placeholder="Período hasta MM/AA" maxlength="5" inputmode="numeric" pattern="(0[1-9]|1[0-2])\/[0-9]{2}" value="<?= e(periodoParaInput($editarEmpresa["periodo_hasta"] ?? "")) ?>">
+</div>
+
+<textarea name="observaciones_acuerdo" placeholder="Observaciones del acuerdo"><?= e($editarEmpresa["observaciones_acuerdo"] ?? "") ?></textarea>
 <textarea name="observaciones_empresa" placeholder="Observaciones empresa"><?= e($editarEmpresa["observaciones"] ?? "") ?></textarea>
+
+<?php if($errorEmpresa !== ""): ?>
+<p class="error"><?= e($errorEmpresa) ?></p>
+<?php endif; ?>
 
 <br><br>
 <button name="guardar_empresa"><?= $editarEmpresa ? "Guardar cambios empresa" : "Guardar empresa" ?></button>
@@ -568,6 +628,11 @@ Comprobante actual:
 <option value="sindicato">Sindicato</option>
 <option value="mutual">Mutual</option>
 </select>
+<select id="filtroEmpresaPlan">
+<option value="">Plan: Todos</option>
+<option value="pago-unico">Pago único</option>
+<option value="acuerdo">Acuerdo</option>
+</select>
 <input type="text" id="filtroEmpresaTexto" placeholder="Buscar por razón social o CUIT">
 <select id="filtroEmpresaEstado">
 <option value="">Todas</option>
@@ -583,6 +648,10 @@ Comprobante actual:
 <tr>
 <th>Razón Social</th>
 <th>CUIT</th>
+<th>Monto total</th>
+<th>Plan</th>
+<th>Cuotas</th>
+<th>Período acuerdo</th>
 <th>Deuda OS</th>
 <th>Cobrado OS</th>
 <th>Saldo OS</th>
@@ -597,13 +666,25 @@ Comprobante actual:
 </thead>
 <tbody>
 <?php if(empty($empresas)): ?>
-<tr><td colspan="12" class="sin">Todavía no hay empresas cargadas.</td></tr>
+<tr><td colspan="16" class="sin">Todavía no hay empresas cargadas.</td></tr>
 <?php endif; ?>
 
 <?php foreach($empresas as $emp):
 $deudaOS = floatval($emp["deuda_os"] ?? 0);
 $deudaSind = floatval($emp["deuda_sindicato"] ?? 0);
 $deudaMutual = floatval($emp["deuda_mutual"] ?? 0);
+$montoTotalEmpresa = floatval($emp["monto_total"] ?? 0);
+$cantidadCuotasEmpresa = max(intval($emp["cantidad_cuotas"] ?? 1), 1);
+$montoCuotaEmpresa = floatval($emp["monto_cuota"] ?? 0);
+$periodoDesdeEmpresa = periodoParaInput($emp["periodo_desde"] ?? "");
+$periodoHastaEmpresa = periodoParaInput($emp["periodo_hasta"] ?? "");
+$esAcuerdoEmpresa = $cantidadCuotasEmpresa > 1;
+$planEmpresa = $esAcuerdoEmpresa ? "Acuerdo" : "Pago único";
+$planFiltroEmpresa = $esAcuerdoEmpresa ? "acuerdo" : "pago-unico";
+$cuotasEmpresa = $esAcuerdoEmpresa ? ($cantidadCuotasEmpresa . " x " . dinero($montoCuotaEmpresa)) : "1";
+$periodoAcuerdoEmpresa = $esAcuerdoEmpresa
+    ? trim($periodoDesdeEmpresa . (($periodoDesdeEmpresa !== "" || $periodoHastaEmpresa !== "") ? " a " : "") . $periodoHastaEmpresa)
+    : ($periodoDesdeEmpresa ?: $periodoHastaEmpresa);
 
 $pagadoOS = totalPagado($pagos, $emp["id"], "Obra Social");
 $pagadoSind = totalPagado($pagos, $emp["id"], "Sindicato");
@@ -621,9 +702,13 @@ $categoriaOS = ($deudaOS > 0 || $pagadoOS > 0) ? "1" : "0";
 $categoriaSind = ($deudaSind > 0 || $pagadoSind > 0) ? "1" : "0";
 $categoriaMutual = ($deudaMutual > 0 || $pagadoMutual > 0) ? "1" : "0";
 ?>
-<tr class="fila-empresa" data-busqueda="<?= e(($emp["razon"] ?? "") . " " . ($emp["cuit"] ?? "")) ?>" data-estado="<?= e($estadoEmpresa) ?>" data-os="<?= e($categoriaOS) ?>" data-sindicato="<?= e($categoriaSind) ?>" data-mutual="<?= e($categoriaMutual) ?>">
+<tr class="fila-empresa" data-busqueda="<?= e(($emp["razon"] ?? "") . " " . ($emp["cuit"] ?? "")) ?>" data-estado="<?= e($estadoEmpresa) ?>" data-plan="<?= e($planFiltroEmpresa) ?>" data-os="<?= e($categoriaOS) ?>" data-sindicato="<?= e($categoriaSind) ?>" data-mutual="<?= e($categoriaMutual) ?>">
 <td><?= e($emp["razon"]) ?></td>
 <td><?= e($emp["cuit"]) ?></td>
+<td><?= dinero($montoTotalEmpresa) ?></td>
+<td><?= e($planEmpresa) ?></td>
+<td><?= e($cuotasEmpresa) ?></td>
+<td><?= e($periodoAcuerdoEmpresa) ?></td>
 <td><?= dinero($deudaOS) ?></td>
 <td class="saldo-ok"><?= dinero($pagadoOS) ?></td>
 <td class="<?= $saldoOS <= 0 ? 'saldo-ok' : 'saldo-debe' ?>"><?= dinero($saldoOS) ?></td>
@@ -745,6 +830,58 @@ document.querySelectorAll(".periodo-input").forEach((input) => {
     });
 });
 
+const empresaForm = document.querySelector('form:not([enctype])');
+if (empresaForm) {
+    empresaForm.addEventListener("submit", (event) => {
+        const montoTotal = Number(empresaForm.querySelector('input[name="monto_total"]')?.value || 0);
+        const cantidadCuotas = Number(empresaForm.querySelector('input[name="cantidad_cuotas"]')?.value || 1);
+        const montoCuota = Number(empresaForm.querySelector('input[name="monto_cuota"]')?.value || 0);
+        const periodoDesde = empresaForm.querySelector('input[name="periodo_desde"]');
+        const periodoHasta = empresaForm.querySelector('input[name="periodo_hasta"]');
+
+        if (montoTotal < 0) {
+            event.preventDefault();
+            alert("El monto total no puede ser negativo.");
+            empresaForm.querySelector('input[name="monto_total"]')?.focus();
+            return;
+        }
+
+        if (cantidadCuotas < 1) {
+            event.preventDefault();
+            alert("La cantidad de cuotas debe ser como mínimo 1.");
+            empresaForm.querySelector('input[name="cantidad_cuotas"]')?.focus();
+            return;
+        }
+
+        if (cantidadCuotas > 1 && montoCuota <= 0) {
+            event.preventDefault();
+            alert("Si hay acuerdo, el monto de cada cuota debe ser mayor a 0.");
+            empresaForm.querySelector('input[name="monto_cuota"]')?.focus();
+            return;
+        }
+
+        if (cantidadCuotas > 1 && (!periodoDesde?.value || !periodoHasta?.value)) {
+            event.preventDefault();
+            alert("Si hay acuerdo, el período desde y el período hasta son obligatorios.");
+            (periodoDesde && !periodoDesde.value ? periodoDesde : periodoHasta)?.focus();
+            return;
+        }
+
+        if (periodoDesde?.value && !periodoValidoCliente(periodoDesde.value)) {
+            event.preventDefault();
+            alert("El período desde debe tener formato MM/AA.");
+            periodoDesde.focus();
+            return;
+        }
+
+        if (periodoHasta?.value && !periodoValidoCliente(periodoHasta.value)) {
+            event.preventDefault();
+            alert("El período hasta debe tener formato MM/AA.");
+            periodoHasta.focus();
+        }
+    });
+}
+
 const pagoForm = document.querySelector('form[enctype="multipart/form-data"]');
 if (pagoForm) {
     pagoForm.addEventListener("submit", (event) => {
@@ -829,30 +966,35 @@ function configurarCardsPlegables() {
 
 function configurarFiltrosEmpresas() {
     const categoria = document.getElementById("filtroEmpresaCategoria");
+    const plan = document.getElementById("filtroEmpresaPlan");
     const texto = document.getElementById("filtroEmpresaTexto");
     const estado = document.getElementById("filtroEmpresaEstado");
     const limpiar = document.getElementById("limpiarFiltrosEmpresas");
     const filas = Array.from(document.querySelectorAll(".fila-empresa"));
-    if (!categoria || !texto || !estado || !limpiar) return;
+    if (!categoria || !plan || !texto || !estado || !limpiar) return;
 
     const aplicar = () => {
         const categoriaValor = categoria.value;
+        const planValor = plan.value;
         const busqueda = textoNormalizado(texto.value);
         const estadoValor = estado.value;
 
         filas.forEach((fila) => {
             const coincideCategoria = !categoriaValor || fila.dataset[categoriaValor] === "1";
+            const coincidePlan = !planValor || fila.dataset.plan === planValor;
             const coincideTexto = textoNormalizado(fila.dataset.busqueda).includes(busqueda);
             const coincideEstado = !estadoValor || fila.dataset.estado === estadoValor;
-            fila.classList.toggle("fila-oculta", !(coincideCategoria && coincideTexto && coincideEstado));
+            fila.classList.toggle("fila-oculta", !(coincideCategoria && coincidePlan && coincideTexto && coincideEstado));
         });
     };
 
     categoria.addEventListener("change", aplicar);
+    plan.addEventListener("change", aplicar);
     texto.addEventListener("input", aplicar);
     estado.addEventListener("change", aplicar);
     limpiar.addEventListener("click", () => {
         categoria.value = "";
+        plan.value = "";
         texto.value = "";
         estado.value = "";
         aplicar();
