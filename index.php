@@ -392,10 +392,14 @@ button{background:#087a46;color:white;border:0;font-weight:bold;cursor:pointer}
 .filters-grid.informe{grid-template-columns:1fr 1fr auto}
 .filters input,.filters select{width:100%;background:white}
 .filters button{white-space:nowrap}
-.informe-resumen{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:12px 0 16px}
+.informe-resumen{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:12px 0 16px}
 .informe-resumen .box{padding:14px}
 .mini-title{margin:18px 0 8px;color:#087a46}
 .btn-small{display:inline-block;background:#087a46;color:white;border:0;padding:7px 10px;border-radius:8px;text-decoration:none;font-weight:bold;cursor:pointer}
+.estado{display:inline-block;padding:4px 8px;border-radius:20px;font-weight:bold;font-size:12px}
+.estado-ok{background:#eaf7f0;color:#087a46}
+.estado-parcial{background:#fff4df;color:#b76500}
+.estado-deudor{background:#fde7eb;color:#b00020}
 table{width:100%;border-collapse:collapse}
 th,td{padding:10px;border-bottom:1px solid #ddd;text-align:left;font-size:14px}
 th{background:#087a46;color:white}
@@ -571,10 +575,12 @@ Comprobante actual:
 </div>
 
 <div class="informe-resumen">
-<div class="box"><div class="label">Total pagado en el período</div><div class="num" id="informeTotal">$0,00</div></div>
+<div class="box"><div class="label">Período consultado</div><div class="num" id="informePeriodoConsultado">--</div></div>
+<div class="box"><div class="label">Total esperado del período</div><div class="num" id="informeEsperado">$0,00</div></div>
+<div class="box"><div class="label">Total cobrado del período</div><div class="num" id="informeTotal">$0,00</div></div>
+<div class="box"><div class="label">Pendiente de cobro</div><div class="num" id="informePendiente">$0,00</div></div>
 <div class="box"><div class="label">Empresas que pagaron</div><div class="num" id="informePagaron">0</div></div>
 <div class="box"><div class="label">Empresas que NO pagaron</div><div class="num" id="informeNoPagaron">0</div></div>
-<div class="box"><div class="label">Período consultado</div><div class="num" id="informePeriodoConsultado">--</div></div>
 </div>
 
 <h3 class="mini-title">Empresas que pagaron</h3>
@@ -584,10 +590,10 @@ Comprobante actual:
 <th>Razón social</th>
 <th>CUIT</th>
 <th>Tipo</th>
+<th>Plan</th>
+<th>Cuota esperada</th>
 <th>Monto pagado</th>
-<th>Forma de pago</th>
-<th>Fecha de pago</th>
-<th>Comprobante</th>
+<th>Estado</th>
 </tr>
 </thead>
 <tbody id="informePagaronBody">
@@ -602,12 +608,15 @@ Comprobante actual:
 <th>Razón social</th>
 <th>CUIT</th>
 <th>Tipo adeudado</th>
-<th>Último pago registrado</th>
+<th>Plan</th>
+<th>Cuota esperada</th>
+<th>Período acuerdo</th>
+<th>Estado</th>
 <th>Acciones</th>
 </tr>
 </thead>
 <tbody id="informeNoPagaronBody">
-<tr><td colspan="5" class="sin">Ingresá un período para consultar.</td></tr>
+<tr><td colspan="8" class="sin">Ingresá un período para consultar.</td></tr>
 </tbody>
 </table>
 </div>
@@ -924,6 +933,55 @@ function periodoNormalizado(valor) {
     return periodo;
 }
 
+function periodoAIndice(periodo) {
+    const normalizado = periodoNormalizado(periodo);
+    if (!periodoValidoCliente(normalizado)) return null;
+    const [mes, anio] = normalizado.split("/").map(Number);
+    return (2000 + anio) * 12 + mes;
+}
+
+function planEmpresa(empresa) {
+    const cantidad = Math.max(Number(empresa.cantidad_cuotas || 1), 1);
+    return cantidad > 1 ? "Acuerdo" : "Pago único";
+}
+
+function periodoAcuerdoEmpresa(empresa) {
+    const desde = periodoNormalizado(empresa.periodo_desde || "");
+    const hasta = periodoNormalizado(empresa.periodo_hasta || "");
+    if (desde && hasta && desde !== hasta) return `${desde} a ${hasta}`;
+    return desde || hasta || "";
+}
+
+function tieneDatosAcuerdo(empresa) {
+    return Number(empresa.monto_total || 0) > 0 ||
+        Number(empresa.monto_cuota || 0) > 0 ||
+        Number(empresa.cantidad_cuotas || 0) > 0 ||
+        !!periodoNormalizado(empresa.periodo_desde || "") ||
+        !!periodoNormalizado(empresa.periodo_hasta || "");
+}
+
+function cuotaEsperadaEmpresaPeriodo(empresa, periodo) {
+    const cantidad = Math.max(Number(empresa.cantidad_cuotas || 1), 1);
+    const consultado = periodoAIndice(periodo);
+    const desde = periodoAIndice(empresa.periodo_desde || "");
+    const hasta = periodoAIndice(empresa.periodo_hasta || "");
+    if (consultado === null) return 0;
+
+    if (cantidad <= 1) {
+        const periodoUnico = desde ?? hasta;
+        if (periodoUnico !== null && consultado === periodoUnico) {
+            return Math.max(Number(empresa.monto_total || empresa.monto_cuota || 0), 0);
+        }
+        return 0;
+    }
+
+    if (desde !== null && hasta !== null && consultado >= desde && consultado <= hasta) {
+        return Math.max(Number(empresa.monto_cuota || 0), 0);
+    }
+
+    return 0;
+}
+
 function obtenerEmpresa(id) {
     return empresasData.find((empresa) => (empresa.id || "") === (id || "")) || null;
 }
@@ -1097,26 +1155,30 @@ function configurarInformePeriodo() {
     const periodoInput = document.getElementById("informePeriodo");
     const tipoInput = document.getElementById("informeTipo");
     const consultar = document.getElementById("generarInformePeriodo");
+    const esperadoEl = document.getElementById("informeEsperado");
     const totalEl = document.getElementById("informeTotal");
+    const pendienteEl = document.getElementById("informePendiente");
     const pagaronEl = document.getElementById("informePagaron");
     const noPagaronEl = document.getElementById("informeNoPagaron");
     const periodoEl = document.getElementById("informePeriodoConsultado");
     const pagaronBody = document.getElementById("informePagaronBody");
     const noPagaronBody = document.getElementById("informeNoPagaronBody");
 
-    if (!periodoInput || !tipoInput || !consultar || !totalEl || !pagaronEl || !noPagaronEl || !periodoEl || !pagaronBody || !noPagaronBody) return;
+    if (!periodoInput || !tipoInput || !consultar || !esperadoEl || !totalEl || !pendienteEl || !pagaronEl || !noPagaronEl || !periodoEl || !pagaronBody || !noPagaronBody) return;
 
     const render = () => {
         const periodo = periodoInput.value;
         const tiposSeleccionados = tipoInput.value ? [tipoInput.value] : tiposInforme;
 
         if (!periodoValidoCliente(periodo)) {
+            esperadoEl.textContent = "$0,00";
             totalEl.textContent = "$0,00";
+            pendienteEl.textContent = "$0,00";
             pagaronEl.textContent = "0";
             noPagaronEl.textContent = "0";
             periodoEl.textContent = "--";
             pagaronBody.innerHTML = '<tr><td colspan="7" class="sin">Ingresá un período MM/AA para consultar.</td></tr>';
-            noPagaronBody.innerHTML = '<tr><td colspan="5" class="sin">Ingresá un período MM/AA para consultar.</td></tr>';
+            noPagaronBody.innerHTML = '<tr><td colspan="8" class="sin">Ingresá un período MM/AA para consultar.</td></tr>';
             return;
         }
 
@@ -1124,63 +1186,107 @@ function configurarInformePeriodo() {
             periodoNormalizado(pago.periodo) === periodo && tiposSeleccionados.includes(pago.tipo || "")
         );
 
-        const totalPagado = pagosPeriodo.reduce((total, pago) => total + (Number(pago.monto) || 0), 0);
-        const empresasQuePagaron = new Set(pagosPeriodo.map((pago) => pago.empresa_id || "").filter(Boolean));
-        const clavesPagadas = new Set(pagosPeriodo.map((pago) => (pago.empresa_id || "") + "|" + (pago.tipo || "")));
+        const pagosAgrupados = new Map();
+        pagosPeriodo.forEach((pago) => {
+            const clave = (pago.empresa_id || "") + "|" + (pago.tipo || "");
+            const actual = pagosAgrupados.get(clave) || {
+                empresaId: pago.empresa_id || "",
+                tipo: pago.tipo || "",
+                monto: 0
+            };
+            actual.monto += Number(pago.monto) || 0;
+            pagosAgrupados.set(clave, actual);
+        });
+
+        const filasPagaron = [];
         const deudores = [];
+        let totalEsperado = 0;
 
         empresasData.forEach((empresa) => {
             tiposSeleccionados.forEach((tipo) => {
                 if (!empresaObligadaPorTipo(empresa, tipo)) return;
 
                 const clave = (empresa.id || "") + "|" + tipo;
-                if (!clavesPagadas.has(clave)) {
-                    deudores.push({ empresa, tipo, ultimoPago: ultimoPagoEmpresaTipo(empresa.id || "", tipo) });
+                const esperadoPorAcuerdo = cuotaEsperadaEmpresaPeriodo(empresa, periodo);
+                const usaAcuerdo = tieneDatosAcuerdo(empresa);
+                const pago = pagosAgrupados.get(clave);
+                const aplicaEnPeriodo = esperadoPorAcuerdo > 0 || (!usaAcuerdo && pago);
+
+                if (!aplicaEnPeriodo) return;
+
+                const esperado = esperadoPorAcuerdo;
+                totalEsperado += esperado;
+
+                if (pago) {
+                    filasPagaron.push({
+                        empresa,
+                        tipo,
+                        plan: planEmpresa(empresa),
+                        esperado,
+                        pagado: pago.monto,
+                        estado: pago.monto >= esperado ? "AL DÍA" : "PARCIAL"
+                    });
+                } else {
+                    deudores.push({ empresa, tipo, plan: planEmpresa(empresa), esperado });
                 }
             });
         });
 
+        pagosAgrupados.forEach((pago, clave) => {
+            if (filasPagaron.some((fila) => (fila.empresa.id || "") + "|" + fila.tipo === clave)) return;
+            const empresa = obtenerEmpresa(pago.empresaId);
+            filasPagaron.push({
+                empresa,
+                tipo: pago.tipo,
+                plan: empresa ? planEmpresa(empresa) : "",
+                esperado: empresa ? cuotaEsperadaEmpresaPeriodo(empresa, periodo) : 0,
+                pagado: pago.monto,
+                estado: "AL DÍA"
+            });
+        });
+
+        const totalPagado = filasPagaron.reduce((total, fila) => total + fila.pagado, 0);
+        const pendiente = Math.max(totalEsperado - totalPagado, 0);
+        const empresasQuePagaron = new Set(filasPagaron.map((fila) => fila.empresa?.id || "").filter(Boolean));
         const empresasQueNoPagaron = new Set(deudores.map((fila) => fila.empresa.id || "").filter(Boolean));
 
+        esperadoEl.textContent = dineroCliente(totalEsperado);
         totalEl.textContent = dineroCliente(totalPagado);
+        pendienteEl.textContent = dineroCliente(pendiente);
         pagaronEl.textContent = empresasQuePagaron.size.toString();
         noPagaronEl.textContent = empresasQueNoPagaron.size.toString();
         periodoEl.textContent = periodo;
 
-        if (pagosPeriodo.length === 0) {
+        if (filasPagaron.length === 0) {
             pagaronBody.innerHTML = '<tr><td colspan="7" class="sin">No hay pagos registrados para este período y tipo.</td></tr>';
         } else {
-            pagaronBody.innerHTML = pagosPeriodo.map((pago) => {
-                const empresa = obtenerEmpresa(pago.empresa_id);
-                const comprobante = pago.comprobante
-                    ? `<a href="${escapeHtml(pago.comprobante)}" target="_blank" title="Ver">👁️</a> <a href="${escapeHtml(pago.comprobante)}" download title="Descargar">⬇️</a>`
-                    : '<span class="sin">Sin comprobante</span>';
+            pagaronBody.innerHTML = filasPagaron.map((fila) => {
+                const estadoClase = fila.estado === "AL DÍA" ? "estado-ok" : "estado-parcial";
 
                 return `<tr>
-<td>${escapeHtml(empresa ? empresa.razon : "Empresa eliminada")}</td>
-<td>${escapeHtml(empresa ? empresa.cuit : "")}</td>
-<td><span class="badge">${escapeHtml(pago.tipo || "")}</span></td>
-<td>${dineroCliente(pago.monto)}</td>
-<td>${escapeHtml(pago.forma_pago || "")}</td>
-<td>${escapeHtml(pago.fecha || "")}</td>
-<td>${comprobante}</td>
+<td>${escapeHtml(fila.empresa ? fila.empresa.razon : "Empresa eliminada")}</td>
+<td>${escapeHtml(fila.empresa ? fila.empresa.cuit : "")}</td>
+<td><span class="badge">${escapeHtml(fila.tipo || "")}</span></td>
+<td>${escapeHtml(fila.plan)}</td>
+<td>${dineroCliente(fila.esperado)}</td>
+<td>${dineroCliente(fila.pagado)}</td>
+<td><span class="estado ${estadoClase}">${escapeHtml(fila.estado)}</span></td>
 </tr>`;
             }).join("");
         }
 
         if (deudores.length === 0) {
-            noPagaronBody.innerHTML = '<tr><td colspan="5" class="sin">No hay empresas pendientes para este período y tipo.</td></tr>';
+            noPagaronBody.innerHTML = '<tr><td colspan="8" class="sin">No hay empresas pendientes para este período y tipo.</td></tr>';
         } else {
-            noPagaronBody.innerHTML = deudores.map(({ empresa, tipo, ultimoPago }) => {
-                const ultimo = ultimoPago
-                    ? `${escapeHtml(periodoNormalizado(ultimoPago.periodo))} - ${escapeHtml(ultimoPago.fecha || "")} - ${dineroCliente(ultimoPago.monto)}`
-                    : '<span class="sin">Sin pagos previos</span>';
-
+            noPagaronBody.innerHTML = deudores.map(({ empresa, tipo, plan, esperado }) => {
                 return `<tr>
 <td>${escapeHtml(empresa.razon || "")}</td>
 <td>${escapeHtml(empresa.cuit || "")}</td>
 <td><span class="badge">${escapeHtml(tipo)}</span></td>
-<td>${ultimo}</td>
+<td>${escapeHtml(plan)}</td>
+<td>${dineroCliente(esperado)}</td>
+<td>${escapeHtml(periodoAcuerdoEmpresa(empresa) || periodo)}</td>
+<td><span class="estado estado-deudor">DEUDOR</span></td>
 <td><button type="button" class="btn-small cargar-pago-informe" data-empresa="${escapeHtml(empresa.id || "")}" data-tipo="${escapeHtml(tipo)}" data-periodo="${escapeHtml(periodo)}">Cargar pago</button></td>
 </tr>`;
             }).join("");
