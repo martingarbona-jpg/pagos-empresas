@@ -343,8 +343,13 @@ button{background:#087a46;color:white;border:0;font-weight:bold;cursor:pointer}
 .filters{background:#f7fbf9;border:1px solid #dcefe6;border-radius:12px;padding:14px;margin:12px 0 16px}
 .filters-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto;gap:10px;align-items:center}
 .filters-grid.empresas{grid-template-columns:1.2fr 2fr 1fr auto}
+.filters-grid.informe{grid-template-columns:1fr 1fr auto}
 .filters input,.filters select{width:100%;background:white}
 .filters button{white-space:nowrap}
+.informe-resumen{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:12px 0 16px}
+.informe-resumen .box{padding:14px}
+.mini-title{margin:18px 0 8px;color:#087a46}
+.btn-small{display:inline-block;background:#087a46;color:white;border:0;padding:7px 10px;border-radius:8px;text-decoration:none;font-weight:bold;cursor:pointer}
 table{width:100%;border-collapse:collapse}
 th,td{padding:10px;border-bottom:1px solid #ddd;text-align:left;font-size:14px}
 th{background:#087a46;color:white}
@@ -355,7 +360,7 @@ th{background:#087a46;color:white}
 .saldo-debe{color:#b00020;font-weight:bold}
 .error{color:#b00020;font-weight:bold}
 .fila-oculta{display:none}
-@media(max-width:1000px){.grid,.resumen,.filters-grid,.filters-grid.empresas{grid-template-columns:1fr}table{display:block;overflow-x:auto}}
+@media(max-width:1000px){.grid,.resumen,.filters-grid,.filters-grid.empresas,.filters-grid.informe,.informe-resumen{grid-template-columns:1fr}table{display:block;overflow-x:auto}}
 </style>
 </head>
 <body>
@@ -376,6 +381,7 @@ th{background:#087a46;color:white}
 </div>
 
 <div class="quick-actions">
+<button type="button" class="quick-link" data-target="informe-periodo">Informe período</button>
 <button type="button" class="quick-link" data-target="empresas">Ver empresas</button>
 <button type="button" class="quick-link" data-target="pagos">Ver pagos</button>
 <button type="button" class="quick-link" data-target="cargar-empresa">Cargar empresa</button>
@@ -481,6 +487,69 @@ Comprobante actual:
 <a class="btn-cancelar" href="index.php">Cancelar</a>
 <?php endif; ?>
 </form>
+</div>
+</div>
+
+<div class="card collapsible-card" id="informe-periodo" data-card="informe-periodo">
+<div class="card-header">
+<h2>Informe por período</h2>
+<button type="button" class="toggle-card">Minimizar</button>
+</div>
+<div class="card-body">
+
+<div class="filters">
+<div class="filters-grid informe">
+<input type="text" id="informePeriodo" class="periodo-input" placeholder="MM/AA" maxlength="5" inputmode="numeric">
+<select id="informeTipo">
+<option value="">Todos</option>
+<option value="Obra Social">Obra Social</option>
+<option value="Sindicato">Sindicato</option>
+<option value="Mutual">Mutual</option>
+</select>
+<button type="button" id="generarInformePeriodo">Consultar</button>
+</div>
+</div>
+
+<div class="informe-resumen">
+<div class="box"><div class="label">Total pagado en el período</div><div class="num" id="informeTotal">$0,00</div></div>
+<div class="box"><div class="label">Empresas que pagaron</div><div class="num" id="informePagaron">0</div></div>
+<div class="box"><div class="label">Empresas que NO pagaron</div><div class="num" id="informeNoPagaron">0</div></div>
+<div class="box"><div class="label">Período consultado</div><div class="num" id="informePeriodoConsultado">--</div></div>
+</div>
+
+<h3 class="mini-title">Empresas que pagaron</h3>
+<table>
+<thead>
+<tr>
+<th>Razón social</th>
+<th>CUIT</th>
+<th>Tipo</th>
+<th>Monto pagado</th>
+<th>Forma de pago</th>
+<th>Fecha de pago</th>
+<th>Comprobante</th>
+</tr>
+</thead>
+<tbody id="informePagaronBody">
+<tr><td colspan="7" class="sin">Ingresá un período para consultar.</td></tr>
+</tbody>
+</table>
+
+<h3 class="mini-title">Empresas que NO pagaron</h3>
+<table>
+<thead>
+<tr>
+<th>Razón social</th>
+<th>CUIT</th>
+<th>Tipo adeudado</th>
+<th>Último pago registrado</th>
+<th>Acciones</th>
+</tr>
+</thead>
+<tbody id="informeNoPagaronBody">
+<tr><td colspan="5" class="sin">Ingresá un período para consultar.</td></tr>
+</tbody>
+</table>
 </div>
 </div>
 
@@ -656,6 +725,10 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 
 </main>
 <script>
+const empresasData = <?= json_encode($empresas, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>;
+const pagosData = <?= json_encode($pagos, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>;
+const tiposInforme = ["Obra Social", "Sindicato", "Mutual"];
+
 function formatearPeriodo(valor) {
     const numeros = (valor || "").replace(/\D/g, "").slice(0, 4);
     if (numeros.length <= 2) return numeros;
@@ -686,6 +759,36 @@ if (pagoForm) {
 
 function textoNormalizado(valor) {
     return (valor || "").toString().toLowerCase();
+}
+
+function escapeHtml(valor) {
+    return (valor ?? "").toString().replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#039;"
+    }[char]));
+}
+
+function dineroCliente(valor) {
+    const numero = Math.max(Number(valor) || 0, 0);
+    return "$" + numero.toLocaleString("es-AR", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+    });
+}
+
+function periodoNormalizado(valor) {
+    const periodo = (valor || "").toString().trim();
+    if (/^\d{4}-\d{2}$/.test(periodo)) {
+        return periodo.slice(5, 7) + "/" + periodo.slice(2, 4);
+    }
+    return periodo;
+}
+
+function obtenerEmpresa(id) {
+    return empresasData.find((empresa) => (empresa.id || "") === (id || "")) || null;
 }
 
 function actualizarBotonCard(card) {
@@ -791,7 +894,172 @@ function configurarFiltrosPagos() {
     });
 }
 
+function empresaObligadaPorTipo(empresa, tipo) {
+    const deudaCampo = {
+        "Obra Social": "deuda_os",
+        "Sindicato": "deuda_sindicato",
+        "Mutual": "deuda_mutual"
+    }[tipo];
+
+    const tieneDeuda = Number(empresa[deudaCampo] || 0) > 0;
+    const tienePagoHistorico = pagosData.some((pago) =>
+        (pago.empresa_id || "") === (empresa.id || "") && (pago.tipo || "") === tipo
+    );
+
+    return tieneDeuda || tienePagoHistorico;
+}
+
+function ultimoPagoEmpresaTipo(empresaId, tipo) {
+    const pagosTipo = pagosData
+        .filter((pago) => (pago.empresa_id || "") === empresaId && (pago.tipo || "") === tipo)
+        .sort((a, b) => {
+            const fechaA = (a.fecha || a.fecha_carga || "").toString();
+            const fechaB = (b.fecha || b.fecha_carga || "").toString();
+            return fechaB.localeCompare(fechaA);
+        });
+
+    return pagosTipo[0] || null;
+}
+
+function completarFormularioPago(empresaId, tipo, periodo) {
+    const card = document.getElementById("cargar-pago");
+    abrirCard(card);
+
+    const form = document.querySelector('form[enctype="multipart/form-data"]');
+    if (form) {
+        const pagoId = form.querySelector('input[name="pago_id"]');
+        const comprobanteActual = form.querySelector('input[name="comprobante_actual"]');
+        const empresa = form.querySelector('select[name="empresa_id"]');
+        const tipoInput = form.querySelector('select[name="tipo"]');
+        const periodoInput = form.querySelector('input[name="periodo"]');
+        const monto = form.querySelector('input[name="monto"]');
+        const titulo = card ? card.querySelector("h2") : null;
+        const guardar = form.querySelector('button[name="guardar_pago"]');
+
+        if (pagoId) pagoId.value = "";
+        if (comprobanteActual) comprobanteActual.value = "";
+        if (empresa) empresa.value = empresaId;
+        if (tipoInput) tipoInput.value = tipo;
+        if (periodoInput) periodoInput.value = periodo;
+        if (titulo) titulo.textContent = "Cargar pago";
+        if (guardar) guardar.textContent = "Guardar pago";
+        if (monto) monto.focus();
+    }
+
+    if (card) {
+        card.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+}
+
+function configurarInformePeriodo() {
+    const periodoInput = document.getElementById("informePeriodo");
+    const tipoInput = document.getElementById("informeTipo");
+    const consultar = document.getElementById("generarInformePeriodo");
+    const totalEl = document.getElementById("informeTotal");
+    const pagaronEl = document.getElementById("informePagaron");
+    const noPagaronEl = document.getElementById("informeNoPagaron");
+    const periodoEl = document.getElementById("informePeriodoConsultado");
+    const pagaronBody = document.getElementById("informePagaronBody");
+    const noPagaronBody = document.getElementById("informeNoPagaronBody");
+
+    if (!periodoInput || !tipoInput || !consultar || !totalEl || !pagaronEl || !noPagaronEl || !periodoEl || !pagaronBody || !noPagaronBody) return;
+
+    const render = () => {
+        const periodo = periodoInput.value;
+        const tiposSeleccionados = tipoInput.value ? [tipoInput.value] : tiposInforme;
+
+        if (!periodoValidoCliente(periodo)) {
+            totalEl.textContent = "$0,00";
+            pagaronEl.textContent = "0";
+            noPagaronEl.textContent = "0";
+            periodoEl.textContent = "--";
+            pagaronBody.innerHTML = '<tr><td colspan="7" class="sin">Ingresá un período MM/AA para consultar.</td></tr>';
+            noPagaronBody.innerHTML = '<tr><td colspan="5" class="sin">Ingresá un período MM/AA para consultar.</td></tr>';
+            return;
+        }
+
+        const pagosPeriodo = pagosData.filter((pago) =>
+            periodoNormalizado(pago.periodo) === periodo && tiposSeleccionados.includes(pago.tipo || "")
+        );
+
+        const totalPagado = pagosPeriodo.reduce((total, pago) => total + (Number(pago.monto) || 0), 0);
+        const empresasQuePagaron = new Set(pagosPeriodo.map((pago) => pago.empresa_id || "").filter(Boolean));
+        const clavesPagadas = new Set(pagosPeriodo.map((pago) => (pago.empresa_id || "") + "|" + (pago.tipo || "")));
+        const deudores = [];
+
+        empresasData.forEach((empresa) => {
+            tiposSeleccionados.forEach((tipo) => {
+                if (!empresaObligadaPorTipo(empresa, tipo)) return;
+
+                const clave = (empresa.id || "") + "|" + tipo;
+                if (!clavesPagadas.has(clave)) {
+                    deudores.push({ empresa, tipo, ultimoPago: ultimoPagoEmpresaTipo(empresa.id || "", tipo) });
+                }
+            });
+        });
+
+        const empresasQueNoPagaron = new Set(deudores.map((fila) => fila.empresa.id || "").filter(Boolean));
+
+        totalEl.textContent = dineroCliente(totalPagado);
+        pagaronEl.textContent = empresasQuePagaron.size.toString();
+        noPagaronEl.textContent = empresasQueNoPagaron.size.toString();
+        periodoEl.textContent = periodo;
+
+        if (pagosPeriodo.length === 0) {
+            pagaronBody.innerHTML = '<tr><td colspan="7" class="sin">No hay pagos registrados para este período y tipo.</td></tr>';
+        } else {
+            pagaronBody.innerHTML = pagosPeriodo.map((pago) => {
+                const empresa = obtenerEmpresa(pago.empresa_id);
+                const comprobante = pago.comprobante
+                    ? `<a href="${escapeHtml(pago.comprobante)}" target="_blank" title="Ver">👁️</a> <a href="${escapeHtml(pago.comprobante)}" download title="Descargar">⬇️</a>`
+                    : '<span class="sin">Sin comprobante</span>';
+
+                return `<tr>
+<td>${escapeHtml(empresa ? empresa.razon : "Empresa eliminada")}</td>
+<td>${escapeHtml(empresa ? empresa.cuit : "")}</td>
+<td><span class="badge">${escapeHtml(pago.tipo || "")}</span></td>
+<td>${dineroCliente(pago.monto)}</td>
+<td>${escapeHtml(pago.forma_pago || "")}</td>
+<td>${escapeHtml(pago.fecha || "")}</td>
+<td>${comprobante}</td>
+</tr>`;
+            }).join("");
+        }
+
+        if (deudores.length === 0) {
+            noPagaronBody.innerHTML = '<tr><td colspan="5" class="sin">No hay empresas pendientes para este período y tipo.</td></tr>';
+        } else {
+            noPagaronBody.innerHTML = deudores.map(({ empresa, tipo, ultimoPago }) => {
+                const ultimo = ultimoPago
+                    ? `${escapeHtml(periodoNormalizado(ultimoPago.periodo))} - ${escapeHtml(ultimoPago.fecha || "")} - ${dineroCliente(ultimoPago.monto)}`
+                    : '<span class="sin">Sin pagos previos</span>';
+
+                return `<tr>
+<td>${escapeHtml(empresa.razon || "")}</td>
+<td>${escapeHtml(empresa.cuit || "")}</td>
+<td><span class="badge">${escapeHtml(tipo)}</span></td>
+<td>${ultimo}</td>
+<td><button type="button" class="btn-small cargar-pago-informe" data-empresa="${escapeHtml(empresa.id || "")}" data-tipo="${escapeHtml(tipo)}" data-periodo="${escapeHtml(periodo)}">Cargar pago</button></td>
+</tr>`;
+            }).join("");
+
+            noPagaronBody.querySelectorAll(".cargar-pago-informe").forEach((boton) => {
+                boton.addEventListener("click", () => {
+                    completarFormularioPago(boton.dataset.empresa, boton.dataset.tipo, boton.dataset.periodo);
+                });
+            });
+        }
+    };
+
+    consultar.addEventListener("click", render);
+    periodoInput.addEventListener("input", () => {
+        if (periodoValidoCliente(periodoInput.value)) render();
+    });
+    tipoInput.addEventListener("change", render);
+}
+
 configurarCardsPlegables();
+configurarInformePeriodo();
 configurarFiltrosEmpresas();
 configurarFiltrosPagos();
 </script>
