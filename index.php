@@ -36,6 +36,34 @@ function limpiarArchivo($txt) {
     return trim(preg_replace('/[^A-Za-z0-9_\-]/', '_', $txt), "_");
 }
 
+function periodoParaInput($periodo) {
+    $periodo = trim($periodo ?? "");
+    if (preg_match('/^\d{4}-\d{2}$/', $periodo)) {
+        return substr($periodo, 5, 2) . "/" . substr($periodo, 2, 2);
+    }
+    return $periodo;
+}
+
+function periodoValido($periodo) {
+    if (!preg_match('/^(0[1-9]|1[0-2])\/\d{2}$/', trim($periodo ?? ""))) {
+        return false;
+    }
+    return true;
+}
+
+function rutaComprobanteFisico($comprobante, $uploadDir) {
+    $comprobante = trim($comprobante ?? "");
+    if ($comprobante === "") return null;
+
+    $normalizado = str_replace("\\", "/", $comprobante);
+    if (substr($normalizado, 0, 13) !== "comprobantes/") return null;
+
+    $archivo = basename($normalizado);
+    if ($archivo === "") return null;
+
+    return $uploadDir . "/" . $archivo;
+}
+
 function buscarEmpresa($empresas, $id) {
     foreach ($empresas as $e) {
         if (($e["id"] ?? "") === $id) return $e;
@@ -99,6 +127,7 @@ button{background:#087a46;color:white;border:0;font-weight:bold;cursor:pointer}
 
 $empresas = leerJson($empresasFile);
 $pagos = leerJson($pagosFile);
+$errorPago = "";
 
 if (isset($_POST["guardar_empresa"])) {
     $id = $_POST["empresa_id"] ?: uniqid("emp_");
@@ -134,8 +163,11 @@ if (isset($_POST["guardar_empresa"])) {
 if (isset($_POST["guardar_pago"])) {
     $id = $_POST["pago_id"] ?: uniqid("pago_");
     $comprobante = $_POST["comprobante_actual"] ?? "";
+    $periodo = trim($_POST["periodo"] ?? "");
 
-    if (!empty($_FILES["comprobante"]["name"])) {
+    if (!periodoValido($periodo)) {
+        $errorPago = "El periodo debe tener formato MM/AA.";
+    } elseif (!empty($_FILES["comprobante"]["name"])) {
         $ext = strtolower(pathinfo($_FILES["comprobante"]["name"], PATHINFO_EXTENSION));
         $permitidos = ["pdf", "jpg", "jpeg", "png"];
 
@@ -151,36 +183,38 @@ if (isset($_POST["guardar_pago"])) {
         }
     }
 
-    $nuevo = [
-        "id" => $id,
-        "empresa_id" => $_POST["empresa_id"] ?? "",
-        "fecha" => $_POST["fecha"] ?? "",
-        "tipo" => $_POST["tipo"] ?? "",
-        "forma_pago" => $_POST["forma_pago"] ?? "",
-        "monto" => floatval($_POST["monto"] ?? 0),
-        "pago_tipo" => $_POST["pago_tipo"] ?? "Pago total",
-        "cuotas" => $_POST["cuotas"] ?? "",
-        "periodo" => $_POST["periodo"] ?? "",
-        "comprobante" => $comprobante,
-        "observaciones" => trim($_POST["observaciones_pago"] ?? ""),
-        "fecha_carga" => date("Y-m-d H:i:s")
-    ];
+    if ($errorPago === "") {
+        $nuevo = [
+            "id" => $id,
+            "empresa_id" => $_POST["empresa_id"] ?? "",
+            "fecha" => $_POST["fecha"] ?? "",
+            "tipo" => $_POST["tipo"] ?? "",
+            "forma_pago" => $_POST["forma_pago"] ?? "",
+            "monto" => floatval($_POST["monto"] ?? 0),
+            "pago_tipo" => $_POST["pago_tipo"] ?? "Pago total",
+            "cuotas" => $_POST["cuotas"] ?? "",
+            "periodo" => $periodo,
+            "comprobante" => $comprobante,
+            "observaciones" => trim($_POST["observaciones_pago"] ?? ""),
+            "fecha_carga" => date("Y-m-d H:i:s")
+        ];
 
-    $editado = false;
-    foreach ($pagos as $k => $p) {
-        if (($p["id"] ?? "") === $id) {
-            $nuevo["fecha_carga"] = $p["fecha_carga"] ?? date("Y-m-d H:i:s");
-            $pagos[$k] = $nuevo;
-            $editado = true;
-            break;
+        $editado = false;
+        foreach ($pagos as $k => $p) {
+            if (($p["id"] ?? "") === $id) {
+                $nuevo["fecha_carga"] = $p["fecha_carga"] ?? date("Y-m-d H:i:s");
+                $pagos[$k] = $nuevo;
+                $editado = true;
+                break;
+            }
         }
+
+        if (!$editado) $pagos[] = $nuevo;
+
+        guardarJson($pagosFile, $pagos);
+        header("Location: index.php");
+        exit;
     }
-
-    if (!$editado) $pagos[] = $nuevo;
-
-    guardarJson($pagosFile, $pagos);
-    header("Location: index.php");
-    exit;
 }
 
 if (isset($_GET["eliminar_empresa"])) {
@@ -201,6 +235,26 @@ if (isset($_GET["eliminar_pago"])) {
     exit;
 }
 
+if (isset($_GET["eliminar_comprobante"])) {
+    $id = $_GET["eliminar_comprobante"];
+
+    foreach ($pagos as $k => $p) {
+        if (($p["id"] ?? "") === $id) {
+            $rutaFisica = rutaComprobanteFisico($p["comprobante"] ?? "", $uploadDir);
+            if ($rutaFisica && is_file($rutaFisica)) {
+                @unlink($rutaFisica);
+            }
+
+            $pagos[$k]["comprobante"] = "";
+            break;
+        }
+    }
+
+    guardarJson($pagosFile, $pagos);
+    header("Location: index.php?editar_pago=" . urlencode($id));
+    exit;
+}
+
 $editarEmpresa = null;
 if (isset($_GET["editar_empresa"])) {
     $editarEmpresa = buscarEmpresa($empresas, $_GET["editar_empresa"]);
@@ -214,6 +268,22 @@ if (isset($_GET["editar_pago"])) {
             break;
         }
     }
+}
+
+if ($errorPago !== "" && isset($_POST["guardar_pago"])) {
+    $editarPago = [
+        "id" => $_POST["pago_id"] ?? "",
+        "empresa_id" => $_POST["empresa_id"] ?? "",
+        "fecha" => $_POST["fecha"] ?? date("Y-m-d"),
+        "tipo" => $_POST["tipo"] ?? "",
+        "forma_pago" => $_POST["forma_pago"] ?? "",
+        "monto" => $_POST["monto"] ?? "",
+        "pago_tipo" => $_POST["pago_tipo"] ?? "Pago total",
+        "cuotas" => $_POST["cuotas"] ?? "",
+        "periodo" => $_POST["periodo"] ?? "",
+        "comprobante" => $_POST["comprobante_actual"] ?? "",
+        "observaciones" => $_POST["observaciones_pago"] ?? ""
+    ];
 }
 
 $totalDeuda = 0;
@@ -252,6 +322,13 @@ input,select,textarea,button{padding:10px;border:1px solid #ccc;border-radius:8p
 textarea{width:100%;height:65px;margin-top:12px}
 button{background:#087a46;color:white;border:0;font-weight:bold;cursor:pointer}
 .btn-cancelar{display:inline-block;background:#777;color:white;padding:10px 14px;border-radius:8px;text-decoration:none;margin-left:8px}
+.btn-secundario{display:inline-block;background:#eaf7f0;color:#087a46;border:1px solid #b9dfcc;padding:9px 12px;border-radius:8px;text-decoration:none;font-weight:bold;margin-right:8px}
+.btn-danger{display:inline-block;background:#b00020;color:white;border:0;padding:9px 12px;border-radius:8px;text-decoration:none;font-weight:bold}
+.filters{background:#f7fbf9;border:1px solid #dcefe6;border-radius:12px;padding:14px;margin:12px 0 16px}
+.filters-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto;gap:10px;align-items:center}
+.filters-grid.empresas{grid-template-columns:2fr 1fr auto}
+.filters input,.filters select{width:100%;background:white}
+.filters button{white-space:nowrap}
 table{width:100%;border-collapse:collapse}
 th,td{padding:10px;border-bottom:1px solid #ddd;text-align:left;font-size:14px}
 th{background:#087a46;color:white}
@@ -260,7 +337,9 @@ th{background:#087a46;color:white}
 .sin{color:#999}
 .saldo-ok{color:#087a46;font-weight:bold}
 .saldo-debe{color:#b00020;font-weight:bold}
-@media(max-width:1000px){.grid,.resumen{grid-template-columns:1fr}table{display:block;overflow-x:auto}}
+.error{color:#b00020;font-weight:bold}
+.fila-oculta{display:none}
+@media(max-width:1000px){.grid,.resumen,.filters-grid,.filters-grid.empresas{grid-template-columns:1fr}table{display:block;overflow-x:auto}}
 </style>
 </head>
 <body>
@@ -343,12 +422,21 @@ th{background:#087a46;color:white}
 </select>
 
 <input type="number" min="0" name="cuotas" placeholder="Cantidad de cuotas" value="<?= e($editarPago["cuotas"] ?? "") ?>">
-<input type="month" name="periodo" required value="<?= e($editarPago["periodo"] ?? "") ?>">
+<input type="text" name="periodo" class="periodo-input" placeholder="MM/AA" maxlength="5" inputmode="numeric" pattern="(0[1-9]|1[0-2])\/[0-9]{2}" required value="<?= e(periodoParaInput($editarPago["periodo"] ?? "")) ?>">
 <input type="file" name="comprobante" accept=".pdf,.jpg,.jpeg,.png">
 </div>
 
+<?php if($errorPago !== ""): ?>
+<p class="error"><?= e($errorPago) ?></p>
+<?php endif; ?>
+
 <?php if($editarPago && !empty($editarPago["comprobante"])): ?>
-<p>Comprobante actual: <a href="<?= e($editarPago["comprobante"]) ?>" target="_blank">Ver</a></p>
+<p>
+Comprobante actual:
+<a class="btn-secundario" href="<?= e($editarPago["comprobante"]) ?>" target="_blank">👁️ Ver</a>
+<a class="btn-secundario" href="<?= e($editarPago["comprobante"]) ?>" download>⬇️ Descargar</a>
+<a class="btn-danger" href="?eliminar_comprobante=<?= e($editarPago["id"] ?? "") ?>" onclick="return confirm('¿Eliminar solo el comprobante de este pago?')">❌ Comprobante</a>
+</p>
 <?php endif; ?>
 
 <textarea name="observaciones_pago" placeholder="Observaciones pago"><?= e($editarPago["observaciones"] ?? "") ?></textarea>
@@ -363,6 +451,18 @@ th{background:#087a46;color:white}
 
 <div class="card">
 <h2>Empresas registradas</h2>
+
+<div class="filters">
+<div class="filters-grid empresas">
+<input type="text" id="filtroEmpresaTexto" placeholder="Buscar por razón social o CUIT">
+<select id="filtroEmpresaEstado">
+<option value="">Todas</option>
+<option value="deuda">Con deuda</option>
+<option value="cancelada">Canceladas</option>
+</select>
+<button type="button" id="limpiarFiltrosEmpresas">Limpiar filtros</button>
+</div>
+</div>
 
 <table>
 <thead>
@@ -391,8 +491,9 @@ $pagadoMutual = totalPagado($pagos, $emp["id"], "Mutual");
 $saldoOS = floatval($emp["deuda_os"] ?? 0) - $pagadoOS;
 $saldoSind = floatval($emp["deuda_sindicato"] ?? 0) - $pagadoSind;
 $saldoMutual = floatval($emp["deuda_mutual"] ?? 0) - $pagadoMutual;
+$estadoEmpresa = ($saldoOS > 0 || $saldoSind > 0 || $saldoMutual > 0) ? "deuda" : "cancelada";
 ?>
-<tr>
+<tr class="fila-empresa" data-busqueda="<?= e(($emp["razon"] ?? "") . " " . ($emp["cuit"] ?? "")) ?>" data-estado="<?= e($estadoEmpresa) ?>">
 <td><?= e($emp["razon"]) ?></td>
 <td><?= e($emp["cuit"]) ?></td>
 <td><?= dinero($emp["deuda_os"] ?? 0) ?></td>
@@ -413,6 +514,26 @@ $saldoMutual = floatval($emp["deuda_mutual"] ?? 0) - $pagadoMutual;
 
 <div class="card">
 <h2>Pagos registrados</h2>
+
+<div class="filters">
+<div class="filters-grid">
+<input type="text" id="filtroPagoTexto" placeholder="Buscar por empresa o CUIT">
+<select id="filtroPagoTipo">
+<option value="">Todos</option>
+<option value="Obra Social">Obra Social</option>
+<option value="Sindicato">Sindicato</option>
+<option value="Mutual">Mutual</option>
+</select>
+<select id="filtroPagoForma">
+<option value="">Todas</option>
+<option value="Efectivo">Efectivo</option>
+<option value="Transferencia">Transferencia</option>
+<option value="Cheque">Cheque</option>
+</select>
+<input type="text" id="filtroPagoPeriodo" class="periodo-input" placeholder="MM/AA" maxlength="5" inputmode="numeric">
+<button type="button" id="limpiarFiltrosPagos">Limpiar filtros</button>
+</div>
+</div>
 
 <table>
 <thead>
@@ -436,14 +557,15 @@ $saldoMutual = floatval($emp["deuda_mutual"] ?? 0) - $pagadoMutual;
 
 <?php foreach(array_reverse($pagos) as $p):
 $emp = buscarEmpresa($empresas, $p["empresa_id"] ?? "");
+$periodoPago = periodoParaInput($p["periodo"] ?? "");
 ?>
-<tr>
+<tr class="fila-pago" data-busqueda="<?= e(($emp["razon"] ?? "Empresa eliminada") . " " . ($emp["cuit"] ?? "")) ?>" data-tipo="<?= e($p["tipo"] ?? "") ?>" data-forma="<?= e($p["forma_pago"] ?? "") ?>" data-periodo="<?= e($periodoPago) ?>">
 <td><?= e($p["fecha"] ?? "") ?></td>
 <td><?= e($emp["razon"] ?? "Empresa eliminada") ?></td>
 <td><?= e($emp["cuit"] ?? "") ?></td>
 <td><span class="badge"><?= e($p["tipo"] ?? "") ?></span></td>
 <td><?= e($p["forma_pago"] ?? "") ?></td>
-<td><?= e($p["periodo"] ?? "") ?></td>
+<td><?= e($periodoPago) ?></td>
 <td><?= dinero($p["monto"] ?? 0) ?></td>
 <td><?= e(($p["pago_tipo"] ?? "") === "Cuotas" ? ($p["cuotas"] ?? "") : "Total") ?></td>
 <td>
@@ -465,5 +587,103 @@ $emp = buscarEmpresa($empresas, $p["empresa_id"] ?? "");
 </div>
 
 </main>
+<script>
+function formatearPeriodo(valor) {
+    const numeros = (valor || "").replace(/\D/g, "").slice(0, 4);
+    if (numeros.length <= 2) return numeros;
+    return numeros.slice(0, 2) + "/" + numeros.slice(2);
+}
+
+function periodoValidoCliente(valor) {
+    return /^(0[1-9]|1[0-2])\/\d{2}$/.test(valor || "");
+}
+
+document.querySelectorAll(".periodo-input").forEach((input) => {
+    input.addEventListener("input", () => {
+        input.value = formatearPeriodo(input.value);
+    });
+});
+
+const pagoForm = document.querySelector('form[enctype="multipart/form-data"]');
+if (pagoForm) {
+    pagoForm.addEventListener("submit", (event) => {
+        const periodo = pagoForm.querySelector('input[name="periodo"]');
+        if (periodo && !periodoValidoCliente(periodo.value)) {
+            event.preventDefault();
+            alert("El periodo debe tener formato MM/AA.");
+            periodo.focus();
+        }
+    });
+}
+
+function textoNormalizado(valor) {
+    return (valor || "").toString().toLowerCase();
+}
+
+function configurarFiltrosEmpresas() {
+    const texto = document.getElementById("filtroEmpresaTexto");
+    const estado = document.getElementById("filtroEmpresaEstado");
+    const limpiar = document.getElementById("limpiarFiltrosEmpresas");
+    const filas = Array.from(document.querySelectorAll(".fila-empresa"));
+    if (!texto || !estado || !limpiar) return;
+
+    const aplicar = () => {
+        const busqueda = textoNormalizado(texto.value);
+        const estadoValor = estado.value;
+
+        filas.forEach((fila) => {
+            const coincideTexto = textoNormalizado(fila.dataset.busqueda).includes(busqueda);
+            const coincideEstado = !estadoValor || fila.dataset.estado === estadoValor;
+            fila.classList.toggle("fila-oculta", !(coincideTexto && coincideEstado));
+        });
+    };
+
+    texto.addEventListener("input", aplicar);
+    estado.addEventListener("change", aplicar);
+    limpiar.addEventListener("click", () => {
+        texto.value = "";
+        estado.value = "";
+        aplicar();
+    });
+}
+
+function configurarFiltrosPagos() {
+    const texto = document.getElementById("filtroPagoTexto");
+    const tipo = document.getElementById("filtroPagoTipo");
+    const forma = document.getElementById("filtroPagoForma");
+    const periodo = document.getElementById("filtroPagoPeriodo");
+    const limpiar = document.getElementById("limpiarFiltrosPagos");
+    const filas = Array.from(document.querySelectorAll(".fila-pago"));
+    if (!texto || !tipo || !forma || !periodo || !limpiar) return;
+
+    const aplicar = () => {
+        const busqueda = textoNormalizado(texto.value);
+        const periodoValor = periodo.value;
+
+        filas.forEach((fila) => {
+            const coincideTexto = textoNormalizado(fila.dataset.busqueda).includes(busqueda);
+            const coincideTipo = !tipo.value || fila.dataset.tipo === tipo.value;
+            const coincideForma = !forma.value || fila.dataset.forma === forma.value;
+            const coincidePeriodo = !periodoValor || (fila.dataset.periodo || "").startsWith(periodoValor);
+            fila.classList.toggle("fila-oculta", !(coincideTexto && coincideTipo && coincideForma && coincidePeriodo));
+        });
+    };
+
+    texto.addEventListener("input", aplicar);
+    tipo.addEventListener("change", aplicar);
+    forma.addEventListener("change", aplicar);
+    periodo.addEventListener("input", aplicar);
+    limpiar.addEventListener("click", () => {
+        texto.value = "";
+        tipo.value = "";
+        forma.value = "";
+        periodo.value = "";
+        aplicar();
+    });
+}
+
+configurarFiltrosEmpresas();
+configurarFiltrosPagos();
+</script>
 </body>
 </html>
