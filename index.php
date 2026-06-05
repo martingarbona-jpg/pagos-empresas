@@ -290,6 +290,7 @@ $totalCobrado = 0;
 $cobradoOS = 0;
 $cobradoSindicato = 0;
 $cobradoMutual = 0;
+$cantidadPagos = count($pagos);
 
 foreach ($pagos as $p) {
     $monto = floatval($p["monto"] ?? 0);
@@ -328,7 +329,7 @@ main{padding:20px}
 .card.is-collapsed .card-body{display:none}
 .quick-actions{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px}
 .quick-actions button{width:auto}
-.resumen{display:grid;grid-template-columns:repeat(4,1fr);gap:15px}
+.resumen{display:grid;grid-template-columns:repeat(5,1fr);gap:15px}
 .box{background:#eaf7f0;padding:18px;border-radius:14px}
 .label{font-size:14px;color:#555}
 .num{font-size:26px;font-weight:bold;color:#087a46;margin-top:5px}
@@ -371,6 +372,7 @@ th{background:#087a46;color:white}
 <div class="box"><div class="label">Cobrado Obra Social</div><div class="num"><?= dinero($cobradoOS) ?></div></div>
 <div class="box"><div class="label">Cobrado Sindicato</div><div class="num"><?= dinero($cobradoSindicato) ?></div></div>
 <div class="box"><div class="label">Cobrado Mutual</div><div class="num"><?= dinero($cobradoMutual) ?></div></div>
+<div class="box"><div class="label">Pagos registrados</div><div class="num"><?= e($cantidadPagos) ?></div></div>
 </div>
 
 <div class="quick-actions">
@@ -543,8 +545,8 @@ $saldoSind = max($deudaSind - $pagadoSind, 0);
 $saldoMutual = max($deudaMutual - $pagadoMutual, 0);
 
 $tieneDeudaCargada = ($deudaOS > 0 || $deudaSind > 0 || $deudaMutual > 0);
-$tieneSaldoPendiente = ($saldoOS > 0 || $saldoSind > 0 || $saldoMutual > 0);
-$estadoEmpresa = $tieneSaldoPendiente ? "deuda" : ($tieneDeudaCargada ? "cancelada" : "");
+$tieneSaldoReal = ($saldoOS > 0 || $saldoSind > 0 || $saldoMutual > 0);
+$estadoEmpresa = $tieneSaldoReal ? "deuda" : ($tieneDeudaCargada ? "cancelada" : "");
 
 $categoriaOS = ($deudaOS > 0 || $pagadoOS > 0) ? "1" : "0";
 $categoriaSind = ($deudaSind > 0 || $pagadoSind > 0) ? "1" : "0";
