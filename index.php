@@ -313,6 +313,13 @@ header h1{margin:0;font-size:24px}
 header a{color:white;text-decoration:none;font-weight:bold}
 main{padding:20px}
 .card{background:white;border-radius:16px;box-shadow:0 5px 18px #0001;padding:20px;margin-bottom:20px}
+.card-header{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.card-header h2{margin:0}
+.toggle-card{width:auto;background:#eaf7f0;color:#087a46;border:1px solid #b9dfcc;padding:8px 12px}
+.card-body{margin-top:16px}
+.card.is-collapsed .card-body{display:none}
+.quick-actions{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px}
+.quick-actions button{width:auto}
 .resumen{display:grid;grid-template-columns:repeat(3,1fr);gap:15px}
 .box{background:#eaf7f0;padding:18px;border-radius:14px}
 .label{font-size:14px;color:#555}
@@ -357,8 +364,19 @@ th{background:#087a46;color:white}
 <div class="box"><div class="label">Saldo pendiente</div><div class="num"><?= dinero($saldoPendiente) ?></div></div>
 </div>
 
-<div class="card">
+<div class="quick-actions">
+<button type="button" class="quick-link" data-target="empresas">Ver empresas</button>
+<button type="button" class="quick-link" data-target="pagos">Ver pagos</button>
+<button type="button" class="quick-link" data-target="cargar-empresa">Cargar empresa</button>
+<button type="button" class="quick-link" data-target="cargar-pago">Cargar pago</button>
+</div>
+
+<div class="card collapsible-card <?= $editarEmpresa ? "" : "is-collapsed" ?>" id="cargar-empresa" data-card="cargar-empresa">
+<div class="card-header">
 <h2><?= $editarEmpresa ? "Editar empresa" : "Cargar empresa" ?></h2>
+<button type="button" class="toggle-card"><?= $editarEmpresa ? "Minimizar" : "Mostrar" ?></button>
+</div>
+<div class="card-body">
 
 <form method="post">
 <input type="hidden" name="empresa_id" value="<?= e($editarEmpresa["id"] ?? "") ?>">
@@ -380,9 +398,14 @@ th{background:#087a46;color:white}
 <?php endif; ?>
 </form>
 </div>
+</div>
 
-<div class="card">
+<div class="card collapsible-card" id="cargar-pago" data-card="cargar-pago">
+<div class="card-header">
 <h2><?= $editarPago ? "Editar pago" : "Cargar pago" ?></h2>
+<button type="button" class="toggle-card">Minimizar</button>
+</div>
+<div class="card-body">
 
 <form method="post" enctype="multipart/form-data">
 <input type="hidden" name="pago_id" value="<?= e($editarPago["id"] ?? "") ?>">
@@ -448,9 +471,14 @@ Comprobante actual:
 <?php endif; ?>
 </form>
 </div>
+</div>
 
-<div class="card">
+<div class="card collapsible-card" id="empresas" data-card="empresas">
+<div class="card-header">
 <h2>Empresas registradas</h2>
+<button type="button" class="toggle-card">Minimizar</button>
+</div>
+<div class="card-body">
 
 <div class="filters">
 <div class="filters-grid empresas">
@@ -534,9 +562,14 @@ $categoriaMutual = ($deudaMutual > 0 || $pagadoMutual > 0) ? "1" : "0";
 </tbody>
 </table>
 </div>
+</div>
 
-<div class="card">
+<div class="card collapsible-card is-collapsed" id="pagos" data-card="pagos">
+<div class="card-header">
 <h2>Pagos registrados</h2>
+<button type="button" class="toggle-card">Mostrar</button>
+</div>
+<div class="card-body">
 
 <div class="filters">
 <div class="filters-grid">
@@ -608,6 +641,7 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 </tbody>
 </table>
 </div>
+</div>
 
 </main>
 <script>
@@ -641,6 +675,42 @@ if (pagoForm) {
 
 function textoNormalizado(valor) {
     return (valor || "").toString().toLowerCase();
+}
+
+function actualizarBotonCard(card) {
+    const boton = card.querySelector(".toggle-card");
+    if (!boton) return;
+    boton.textContent = card.classList.contains("is-collapsed") ? "Mostrar" : "Minimizar";
+}
+
+function abrirCard(card) {
+    if (!card) return;
+    card.classList.remove("is-collapsed");
+    actualizarBotonCard(card);
+}
+
+function configurarCardsPlegables() {
+    document.querySelectorAll(".collapsible-card").forEach((card) => {
+        const boton = card.querySelector(".toggle-card");
+        actualizarBotonCard(card);
+
+        if (boton) {
+            boton.addEventListener("click", () => {
+                card.classList.toggle("is-collapsed");
+                actualizarBotonCard(card);
+            });
+        }
+    });
+
+    document.querySelectorAll(".quick-link").forEach((boton) => {
+        boton.addEventListener("click", () => {
+            const card = document.getElementById(boton.dataset.target);
+            abrirCard(card);
+            if (card) {
+                card.scrollIntoView({ behavior: "smooth", block: "start" });
+            }
+        });
+    });
 }
 
 function configurarFiltrosEmpresas() {
@@ -710,6 +780,7 @@ function configurarFiltrosPagos() {
     });
 }
 
+configurarCardsPlegables();
 configurarFiltrosEmpresas();
 configurarFiltrosPagos();
 </script>
