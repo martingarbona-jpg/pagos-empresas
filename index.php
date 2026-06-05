@@ -39,16 +39,21 @@ function limpiarArchivo($txt) {
 function periodoParaInput($periodo) {
     $periodo = trim($periodo ?? "");
     if (preg_match('/^\d{4}-\d{2}$/', $periodo)) {
-        return substr($periodo, 5, 2) . "/" . substr($periodo, 2, 2);
+        return "01/" . substr($periodo, 5, 2) . "/" . substr($periodo, 2, 2);
+    }
+    if (preg_match('/^\d{2}\/\d{2}$/', $periodo)) {
+        return "01/" . $periodo;
     }
     return $periodo;
 }
 
 function periodoValido($periodo) {
-    if (!preg_match('/^(0[1-9]|1[0-2])\/\d{2}$/', trim($periodo ?? ""))) {
+    $periodo = trim($periodo ?? "");
+    if (!preg_match('/^(0[1-9]|[12][0-9]|3[01])\/(0[1-9]|1[0-2])\/\d{2}$/', $periodo)) {
         return false;
     }
-    return true;
+    [$dia, $mes, $anio] = array_map('intval', explode('/', $periodo));
+    return checkdate($mes, $dia, 2000 + $anio);
 }
 
 function rutaComprobanteFisico($comprobante, $uploadDir) {
@@ -79,6 +84,13 @@ function totalPagado($pagos, $empresaId, $tipo) {
         }
     }
     return $total;
+}
+
+function eliminarComprobantePago($pago, $uploadDir) {
+    $rutaFisica = rutaComprobanteFisico($pago["comprobante"] ?? "", $uploadDir);
+    if ($rutaFisica && is_file($rutaFisica)) {
+        @unlink($rutaFisica);
+    }
 }
 
 function acuerdoDefault() {
@@ -235,9 +247,9 @@ if (isset($_POST["guardar_acuerdo"])) {
     } elseif ($cantidadCuotasAcuerdo > 1 && ($periodoDesdeAcuerdo === "" || $periodoHastaAcuerdo === "")) {
         $errorEmpresa = "Si hay acuerdo, el período desde y el período hasta son obligatorios.";
     } elseif ($periodoDesdeAcuerdo !== "" && !periodoValido($periodoDesdeAcuerdo)) {
-        $errorEmpresa = "El período desde debe tener formato MM/AA.";
+        $errorEmpresa = "El período desde debe tener formato DD/MM/AA.";
     } elseif ($periodoHastaAcuerdo !== "" && !periodoValido($periodoHastaAcuerdo)) {
-        $errorEmpresa = "El período hasta debe tener formato MM/AA.";
+        $errorEmpresa = "El período hasta debe tener formato DD/MM/AA.";
     }
 
     if ($errorEmpresa === "") {
@@ -270,7 +282,7 @@ if (isset($_POST["guardar_pago"])) {
     $periodo = trim($_POST["periodo"] ?? "");
 
     if (!periodoValido($periodo)) {
-        $errorPago = "El periodo debe tener formato MM/AA.";
+        $errorPago = "El periodo debe tener formato DD/MM/AA.";
     } elseif (!empty($_FILES["comprobante"]["name"])) {
         $ext = strtolower(pathinfo($_FILES["comprobante"]["name"], PATHINFO_EXTENSION));
         $permitidos = ["pdf", "jpg", "jpeg", "png"];
@@ -323,6 +335,11 @@ if (isset($_POST["guardar_pago"])) {
 
 if (isset($_GET["eliminar_empresa"])) {
     $id = $_GET["eliminar_empresa"];
+    foreach ($pagos as $p) {
+        if (($p["empresa_id"] ?? "") === $id) {
+            eliminarComprobantePago($p, $uploadDir);
+        }
+    }
     $empresas = array_values(array_filter($empresas, fn($e) => ($e["id"] ?? "") !== $id));
     $pagos = array_values(array_filter($pagos, fn($p) => ($p["empresa_id"] ?? "") !== $id));
     guardarJson($empresasFile, $empresas);
@@ -333,6 +350,12 @@ if (isset($_GET["eliminar_empresa"])) {
 
 if (isset($_GET["eliminar_pago"])) {
     $id = $_GET["eliminar_pago"];
+    foreach ($pagos as $p) {
+        if (($p["id"] ?? "") === $id) {
+            eliminarComprobantePago($p, $uploadDir);
+            break;
+        }
+    }
     $pagos = array_values(array_filter($pagos, fn($p) => ($p["id"] ?? "") !== $id));
     guardarJson($pagosFile, $pagos);
     header("Location: index.php");
@@ -634,7 +657,7 @@ th{background:#087a46;color:white}
 </select>
 
 <input type="number" min="0" name="cuotas" placeholder="Cantidad de cuotas" value="<?= e($editarPago["cuotas"] ?? "") ?>">
-<input type="text" name="periodo" class="periodo-input" placeholder="MM/AA" maxlength="5" inputmode="numeric" pattern="(0[1-9]|1[0-2])\/[0-9]{2}" required value="<?= e(periodoParaInput($editarPago["periodo"] ?? "")) ?>">
+<input type="text" name="periodo" class="periodo-input" placeholder="DD/MM/AA" maxlength="8" inputmode="numeric" pattern="(0[1-9]|[12][0-9]|3[01])\/(0[1-9]|1[0-2])\/[0-9]{2}" required value="<?= e(periodoParaInput($editarPago["periodo"] ?? "")) ?>">
 <input type="file" name="comprobante" accept=".pdf,.jpg,.jpeg,.png">
 </div>
 
@@ -690,8 +713,8 @@ Comprobante actual:
 <input type="number" step="0.01" min="0" name="acuerdo_monto_total" placeholder="Monto total del acuerdo" value="<?= e($acuerdoForm["monto_total"] ?? "") ?>">
 <input type="number" min="1" name="acuerdo_cantidad_cuotas" placeholder="Cantidad de cuotas" value="<?= e($acuerdoForm["cantidad_cuotas"] ?? "1") ?>">
 <input type="number" step="0.01" min="0" name="acuerdo_monto_cuota" placeholder="Monto de cada cuota" value="<?= e($acuerdoForm["monto_cuota"] ?? "") ?>">
-<input type="text" name="acuerdo_periodo_desde" class="periodo-input" placeholder="Período desde MM/AA" maxlength="5" inputmode="numeric" pattern="(0[1-9]|1[0-2])\/[0-9]{2}" value="<?= e(periodoParaInput($acuerdoForm["periodo_desde"] ?? "")) ?>">
-<input type="text" name="acuerdo_periodo_hasta" class="periodo-input" placeholder="Período hasta MM/AA" maxlength="5" inputmode="numeric" pattern="(0[1-9]|1[0-2])\/[0-9]{2}" value="<?= e(periodoParaInput($acuerdoForm["periodo_hasta"] ?? "")) ?>">
+<input type="text" name="acuerdo_periodo_desde" class="periodo-input" placeholder="Período desde DD/MM/AA" maxlength="8" inputmode="numeric" pattern="(0[1-9]|[12][0-9]|3[01])\/(0[1-9]|1[0-2])\/[0-9]{2}" value="<?= e(periodoParaInput($acuerdoForm["periodo_desde"] ?? "")) ?>">
+<input type="text" name="acuerdo_periodo_hasta" class="periodo-input" placeholder="Período hasta DD/MM/AA" maxlength="8" inputmode="numeric" pattern="(0[1-9]|[12][0-9]|3[01])\/(0[1-9]|1[0-2])\/[0-9]{2}" value="<?= e(periodoParaInput($acuerdoForm["periodo_hasta"] ?? "")) ?>">
 </div>
 
 <textarea name="acuerdo_observaciones" placeholder="Observaciones del acuerdo"><?= e($acuerdoForm["observaciones"] ?? "") ?></textarea>
@@ -717,7 +740,7 @@ Comprobante actual:
 
 <div class="filters">
 <div class="filters-grid informe">
-<input type="text" id="informePeriodo" class="periodo-input" placeholder="MM/AA" maxlength="5" inputmode="numeric">
+<input type="text" id="informePeriodo" class="periodo-input" placeholder="DD/MM/AA" maxlength="8" inputmode="numeric">
 <select id="informeTipo">
 <option value="">Todos</option>
 <option value="Obra Social">Obra Social</option>
@@ -750,10 +773,11 @@ Comprobante actual:
 <th>Estado</th>
 <th>Fecha de pago</th>
 <th>Comprobante</th>
+<th>Acciones</th>
 </tr>
 </thead>
 <tbody id="informePagaronBody">
-<tr><td colspan="9" class="sin">Ingresá un período para consultar.</td></tr>
+<tr><td colspan="10" class="sin">Ingresá un período para consultar.</td></tr>
 </tbody>
 </table>
 
@@ -937,7 +961,7 @@ $categoriaMutual = ($deudaMutual > 0 || $pagadoMutual > 0) ? "1" : "0";
 <option value="Transferencia">Transferencia</option>
 <option value="Cheque">Cheque</option>
 </select>
-<input type="text" id="filtroPagoPeriodo" class="periodo-input" placeholder="MM/AA" maxlength="5" inputmode="numeric">
+<input type="text" id="filtroPagoPeriodo" class="periodo-input" placeholder="DD/MM/AA" maxlength="8" inputmode="numeric">
 <button type="button" id="limpiarFiltrosPagos">Limpiar filtros</button>
 </div>
 </div>
@@ -1003,13 +1027,20 @@ const tiposInforme = ["Obra Social", "Sindicato", "Mutual"];
 const tabInicial = <?= json_encode($tabInicial, JSON_UNESCAPED_UNICODE) ?>;
 
 function formatearPeriodo(valor) {
-    const numeros = (valor || "").replace(/\D/g, "").slice(0, 4);
+    const numeros = (valor || "").replace(/\D/g, "").slice(0, 6);
     if (numeros.length <= 2) return numeros;
-    return numeros.slice(0, 2) + "/" + numeros.slice(2);
+    if (numeros.length <= 4) return numeros.slice(0, 2) + "/" + numeros.slice(2);
+    return numeros.slice(0, 2) + "/" + numeros.slice(2, 4) + "/" + numeros.slice(4);
 }
 
 function periodoValidoCliente(valor) {
-    return /^(0[1-9]|1[0-2])\/\d{2}$/.test(valor || "");
+    const match = (valor || "").match(/^(0[1-9]|[12][0-9]|3[01])\/(0[1-9]|1[0-2])\/(\d{2})$/);
+    if (!match) return false;
+    const dia = Number(match[1]);
+    const mes = Number(match[2]);
+    const anio = 2000 + Number(match[3]);
+    const fecha = new Date(anio, mes - 1, dia);
+    return fecha.getFullYear() === anio && fecha.getMonth() === mes - 1 && fecha.getDate() === dia;
 }
 
 document.querySelectorAll(".periodo-input").forEach((input) => {
@@ -1079,14 +1110,14 @@ if (acuerdoFormEl) {
 
         if (periodoDesde?.value && !periodoValidoCliente(periodoDesde.value)) {
             event.preventDefault();
-            alert("El período desde debe tener formato MM/AA.");
+            alert("El período desde debe tener formato DD/MM/AA.");
             periodoDesde.focus();
             return;
         }
 
         if (periodoHasta?.value && !periodoValidoCliente(periodoHasta.value)) {
             event.preventDefault();
-            alert("El período hasta debe tener formato MM/AA.");
+            alert("El período hasta debe tener formato DD/MM/AA.");
             periodoHasta.focus();
         }
     });
@@ -1105,7 +1136,7 @@ if (pagoForm) {
         }
         if (periodo && !periodoValidoCliente(periodo.value)) {
             event.preventDefault();
-            alert("El periodo debe tener formato MM/AA.");
+            alert("El periodo debe tener formato DD/MM/AA.");
             periodo.focus();
         }
     });
@@ -1136,7 +1167,10 @@ function dineroCliente(valor) {
 function periodoNormalizado(valor) {
     const periodo = (valor || "").toString().trim();
     if (/^\d{4}-\d{2}$/.test(periodo)) {
-        return periodo.slice(5, 7) + "/" + periodo.slice(2, 4);
+        return "01/" + periodo.slice(5, 7) + "/" + periodo.slice(2, 4);
+    }
+    if (/^\d{2}\/\d{2}$/.test(periodo)) {
+        return "01/" + periodo;
     }
     return periodo;
 }
@@ -1144,8 +1178,8 @@ function periodoNormalizado(valor) {
 function periodoAIndice(periodo) {
     const normalizado = periodoNormalizado(periodo);
     if (!periodoValidoCliente(normalizado)) return null;
-    const [mes, anio] = normalizado.split("/").map(Number);
-    return (2000 + anio) * 12 + mes;
+    const [dia, mes, anio] = normalizado.split("/").map(Number);
+    return (2000 + anio) * 372 + mes * 31 + dia;
 }
 
 function acuerdoEmpresaTipo(empresa, tipo) {
@@ -1461,9 +1495,10 @@ ${saldos.map((s) => `<div class="box"><div class="label">${escapeHtml(s.tipo)}</
 <h3 class="mini-title">Acuerdos vigentes</h3>
 <p>${tiposInforme.map((tipo) => escapeHtml(renderAcuerdoResumen(empresa, tipo))).join("<br>")}</p>
 <h3 class="mini-title">Pagos registrados</h3>
-${pagosEmpresa.length ? `<table><thead><tr><th>Fecha</th><th>Tipo</th><th>Período</th><th>Monto</th><th>Forma</th></tr></thead><tbody>${pagosEmpresa.map((pago) => `<tr><td>${escapeHtml(pago.fecha || "")}</td><td>${escapeHtml(pago.tipo || "")}</td><td>${escapeHtml(periodoNormalizado(pago.periodo || ""))}</td><td>${dineroCliente(pago.monto)}</td><td>${escapeHtml(pago.forma_pago || "")}</td></tr>`).join("")}</tbody></table>` : '<p class="sin">Sin pagos registrados.</p>'}
+${pagosEmpresa.length ? `<table><thead><tr><th>Fecha</th><th>Tipo</th><th>Período</th><th>Monto</th><th>Forma</th><th>Acciones</th></tr></thead><tbody>${pagosEmpresa.map((pago) => `<tr><td>${escapeHtml(pago.fecha || "")}</td><td>${escapeHtml(pago.tipo || "")}</td><td>${escapeHtml(periodoNormalizado(pago.periodo || ""))}</td><td>${dineroCliente(pago.monto)}</td><td>${escapeHtml(pago.forma_pago || "")}</td><td><a href="?eliminar_pago=${encodeURIComponent(pago.id || "")}" onclick="return confirm('¿Eliminar este pago?')" title="Eliminar pago">🗑️</a></td></tr>`).join("")}</tbody></table>` : '<p class="sin">Sin pagos registrados.</p>'}
 <br>
 <a class="btn-secundario" href="?editar_empresa=${encodeURIComponent(empresa.id || "")}">Editar empresa</a>
+<a class="btn-danger" href="?eliminar_empresa=${encodeURIComponent(empresa.id || "")}" onclick="return confirm('Esto elimina la empresa y todos sus pagos asociados. ¿Seguro?')">🗑️ Eliminar empresa</a>
 <button type="button" class="btn-small ficha-cargar-pago" data-empresa="${escapeHtml(empresa.id || "")}">Cargar pago</button>
 <button type="button" class="btn-small ficha-cargar-acuerdo" data-empresa="${escapeHtml(empresa.id || "")}">Cargar acuerdo</button>
 `;
@@ -1594,8 +1629,8 @@ function configurarInformePeriodo() {
             pagaronEl.textContent = "0";
             noPagaronEl.textContent = "0";
             periodoEl.textContent = "--";
-            pagaronBody.innerHTML = '<tr><td colspan="9" class="sin">Ingresá un período MM/AA para consultar.</td></tr>';
-            noPagaronBody.innerHTML = '<tr><td colspan="9" class="sin">Ingresá un período MM/AA para consultar.</td></tr>';
+            pagaronBody.innerHTML = '<tr><td colspan="10" class="sin">Ingresá un período DD/MM/AA para consultar.</td></tr>';
+            noPagaronBody.innerHTML = '<tr><td colspan="9" class="sin">Ingresá un período DD/MM/AA para consultar.</td></tr>';
             return;
         }
 
@@ -1611,11 +1646,13 @@ function configurarInformePeriodo() {
                 tipo: pago.tipo || "",
                 monto: 0,
                 fechas: [],
-                comprobantes: []
+                comprobantes: [],
+                ids: []
             };
             actual.monto += Number(pago.monto) || 0;
             if (pago.fecha) actual.fechas.push(pago.fecha);
             if (pago.comprobante) actual.comprobantes.push(pago.comprobante);
+            if (pago.id) actual.ids.push(pago.id);
             pagosAgrupados.set(clave, actual);
         });
 
@@ -1647,6 +1684,7 @@ function configurarInformePeriodo() {
                         pagado: pago.monto,
                         fechas: pago.fechas,
                         comprobantes: pago.comprobantes,
+                        ids: pago.ids,
                         estado: esperado <= 0 ? "EXTRA" : (pago.monto >= esperado ? "AL DÍA" : "PARCIAL")
                     });
                 } else {
@@ -1666,6 +1704,7 @@ function configurarInformePeriodo() {
                 pagado: pago.monto,
                 fechas: pago.fechas,
                 comprobantes: pago.comprobantes,
+                ids: pago.ids,
                 estado: empresa && cuotaEsperadaEmpresaPeriodo(empresa, periodo, pago.tipo) > 0 ? "AL DÍA" : "EXTRA"
             });
         });
@@ -1683,13 +1722,16 @@ function configurarInformePeriodo() {
         periodoEl.textContent = periodo;
 
         if (filasPagaron.length === 0) {
-            pagaronBody.innerHTML = '<tr><td colspan="9" class="sin">No hay pagos registrados para este período y tipo.</td></tr>';
+            pagaronBody.innerHTML = '<tr><td colspan="10" class="sin">No hay pagos registrados para este período y tipo.</td></tr>';
         } else {
             pagaronBody.innerHTML = filasPagaron.map((fila) => {
                 const estadoClase = fila.estado === "AL DÍA" ? "estado-ok" : (fila.estado === "EXTRA" ? "estado-ok" : "estado-parcial");
                 const comprobantes = (fila.comprobantes || []).length
                     ? fila.comprobantes.map((comp, index) => `<a href="${escapeHtml(comp)}" target="_blank" title="Ver">👁️</a> <a href="${escapeHtml(comp)}" download title="Descargar">⬇️</a>${index < fila.comprobantes.length - 1 ? " " : ""}`).join("")
                     : '<span class="sin">Sin comprobante</span>';
+                const acciones = (fila.ids || []).length
+                    ? fila.ids.map((id) => `<a href="?eliminar_pago=${encodeURIComponent(id)}" onclick="return confirm('¿Eliminar este pago?')" title="Eliminar pago">🗑️</a>`).join(" ")
+                    : '<span class="sin">Sin acciones</span>';
 
                 return `<tr>
 <td>${escapeHtml(fila.empresa ? fila.empresa.razon : "Empresa eliminada")}</td>
@@ -1701,6 +1743,7 @@ function configurarInformePeriodo() {
 <td><span class="estado ${estadoClase}">${escapeHtml(fila.estado)}</span></td>
 <td>${escapeHtml((fila.fechas || []).join(", "))}</td>
 <td>${comprobantes}</td>
+<td>${acciones}</td>
 </tr>`;
             }).join("");
         }
