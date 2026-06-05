@@ -461,6 +461,12 @@ main{padding:20px}
 .search-results{margin-top:12px}
 .search-result{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px;border-bottom:1px solid #dcefe6}
 .search-result button{width:auto}
+.empresa-picker{position:relative}
+.empresa-picker-input{width:100%}
+.empresa-picker-results{display:none;position:absolute;top:calc(100% + 4px);left:0;right:0;background:white;border:1px solid #b9dfcc;border-radius:8px;box-shadow:0 8px 20px #0002;max-height:220px;overflow-y:auto;z-index:20}
+.empresa-picker-results.active{display:block}
+.empresa-picker-option{padding:10px;cursor:pointer;border-bottom:1px solid #eaf7f0}
+.empresa-picker-option:hover{background:#eaf7f0;color:#087a46}
 .card{background:white;border-radius:16px;box-shadow:0 5px 18px #0001;padding:20px;margin-bottom:20px}
 .card-header{display:flex;justify-content:space-between;align-items:center;gap:12px}
 .card-header h2{margin:0}
@@ -557,7 +563,7 @@ th{background:#087a46;color:white}
 </div>
 <div class="card-body">
 
-<form method="post">
+<form method="post" id="empresaForm">
 <input type="hidden" name="empresa_id" value="<?= e($editarEmpresa["id"] ?? "") ?>">
 
 <div class="grid">
@@ -597,14 +603,12 @@ th{background:#087a46;color:white}
 <input type="hidden" name="comprobante_actual" value="<?= e($editarPago["comprobante"] ?? "") ?>">
 
 <div class="grid">
-<select name="empresa_id" required>
-<option value="">Seleccionar empresa</option>
-<?php foreach($empresas as $emp): ?>
-<option value="<?= e($emp["id"]) ?>" <?= (($editarPago["empresa_id"] ?? "") === $emp["id"]) ? "selected" : "" ?>>
-<?= e($emp["razon"]) ?> - <?= e($emp["cuit"]) ?>
-</option>
-<?php endforeach; ?>
-</select>
+<?php $empresaPagoSeleccionada = buscarEmpresa($empresas, $editarPago["empresa_id"] ?? ""); ?>
+<div class="empresa-picker" data-hidden-name="empresa_id">
+<input type="text" class="empresa-picker-input" placeholder="Buscar empresa por razón social o CUIT" autocomplete="off" value="<?= e($empresaPagoSeleccionada ? (($empresaPagoSeleccionada["razon"] ?? "") . " - " . ($empresaPagoSeleccionada["cuit"] ?? "")) : "") ?>">
+<input type="hidden" name="empresa_id" class="empresa-picker-hidden" required value="<?= e($editarPago["empresa_id"] ?? "") ?>">
+<div class="empresa-picker-results"></div>
+</div>
 
 <input type="date" name="fecha" required value="<?= e($editarPago["fecha"] ?? date("Y-m-d")) ?>">
 
@@ -669,14 +673,12 @@ Comprobante actual:
 
 <form method="post" id="acuerdoForm">
 <div class="grid">
-<select name="acuerdo_empresa_id" id="acuerdoEmpresa" required>
-<option value="">Seleccionar empresa</option>
-<?php foreach($empresas as $emp): ?>
-<option value="<?= e($emp["id"]) ?>" <?= (($acuerdoForm["empresa_id"] ?? "") === $emp["id"]) ? "selected" : "" ?>>
-<?= e($emp["razon"]) ?> - <?= e($emp["cuit"]) ?>
-</option>
-<?php endforeach; ?>
-</select>
+<?php $empresaAcuerdoSeleccionada = buscarEmpresa($empresas, $acuerdoForm["empresa_id"] ?? ""); ?>
+<div class="empresa-picker" data-hidden-name="acuerdo_empresa_id">
+<input type="text" id="acuerdoEmpresaTexto" class="empresa-picker-input" placeholder="Buscar empresa por razón social o CUIT" autocomplete="off" value="<?= e($empresaAcuerdoSeleccionada ? (($empresaAcuerdoSeleccionada["razon"] ?? "") . " - " . ($empresaAcuerdoSeleccionada["cuit"] ?? "")) : "") ?>">
+<input type="hidden" name="acuerdo_empresa_id" id="acuerdoEmpresa" class="empresa-picker-hidden" required value="<?= e($acuerdoForm["empresa_id"] ?? "") ?>">
+<div class="empresa-picker-results"></div>
+</div>
 
 <select name="acuerdo_tipo" id="acuerdoTipo" required>
 <option value="">Tipo</option>
@@ -1016,7 +1018,7 @@ document.querySelectorAll(".periodo-input").forEach((input) => {
     });
 });
 
-const empresaForm = document.querySelector('form:not([enctype])');
+const empresaForm = document.getElementById("empresaForm");
 if (empresaForm) {
     empresaForm.addEventListener("submit", (event) => {
         ["deuda_os", "deuda_sindicato", "deuda_mutual"].forEach((campo) => {
@@ -1033,11 +1035,19 @@ if (empresaForm) {
 const acuerdoFormEl = document.getElementById("acuerdoForm");
 if (acuerdoFormEl) {
     acuerdoFormEl.addEventListener("submit", (event) => {
+        const empresaId = acuerdoFormEl.querySelector('input[name="acuerdo_empresa_id"]')?.value || "";
         const montoTotal = Number(acuerdoFormEl.querySelector('input[name="acuerdo_monto_total"]')?.value || 0);
         const cantidadCuotas = Number(acuerdoFormEl.querySelector('input[name="acuerdo_cantidad_cuotas"]')?.value || 1);
         const montoCuota = Number(acuerdoFormEl.querySelector('input[name="acuerdo_monto_cuota"]')?.value || 0);
         const periodoDesde = acuerdoFormEl.querySelector('input[name="acuerdo_periodo_desde"]');
         const periodoHasta = acuerdoFormEl.querySelector('input[name="acuerdo_periodo_hasta"]');
+
+        if (!empresaId) {
+            event.preventDefault();
+            alert("Seleccioná una empresa desde el buscador.");
+            acuerdoFormEl.querySelector(".empresa-picker-input")?.focus();
+            return;
+        }
 
         if (montoTotal < 0) {
             event.preventDefault();
@@ -1085,7 +1095,14 @@ if (acuerdoFormEl) {
 const pagoForm = document.querySelector('form[enctype="multipart/form-data"]');
 if (pagoForm) {
     pagoForm.addEventListener("submit", (event) => {
+        const empresaId = pagoForm.querySelector('input[name="empresa_id"]')?.value || "";
         const periodo = pagoForm.querySelector('input[name="periodo"]');
+        if (!empresaId) {
+            event.preventDefault();
+            alert("Seleccioná una empresa desde el buscador.");
+            pagoForm.querySelector(".empresa-picker-input")?.focus();
+            return;
+        }
         if (periodo && !periodoValidoCliente(periodo.value)) {
             event.preventDefault();
             alert("El periodo debe tener formato MM/AA.");
@@ -1204,6 +1221,10 @@ function obtenerEmpresa(id) {
     return empresasData.find((empresa) => (empresa.id || "") === (id || "")) || null;
 }
 
+function etiquetaEmpresa(empresa) {
+    return empresa ? `${empresa.razon || ""} - ${empresa.cuit || ""}`.trim() : "";
+}
+
 function activarTab(tabId) {
     document.querySelectorAll(".tab-btn").forEach((btn) => {
         btn.classList.toggle("active", btn.dataset.tab === tabId);
@@ -1238,6 +1259,66 @@ function configurarCardsPlegables() {
         }
     });
 
+}
+
+function seleccionarEmpresaPicker(hiddenName, empresaId) {
+    const picker = document.querySelector(`.empresa-picker[data-hidden-name="${hiddenName}"]`);
+    const empresa = obtenerEmpresa(empresaId);
+    if (!picker || !empresa) return;
+
+    const visible = picker.querySelector(".empresa-picker-input");
+    const hidden = picker.querySelector(".empresa-picker-hidden");
+    const resultados = picker.querySelector(".empresa-picker-results");
+    if (visible) visible.value = etiquetaEmpresa(empresa);
+    if (hidden) hidden.value = empresa.id || "";
+    if (resultados) {
+        resultados.innerHTML = "";
+        resultados.classList.remove("active");
+    }
+}
+
+function configurarEmpresaPickers() {
+    document.querySelectorAll(".empresa-picker").forEach((picker) => {
+        const visible = picker.querySelector(".empresa-picker-input");
+        const hidden = picker.querySelector(".empresa-picker-hidden");
+        const resultados = picker.querySelector(".empresa-picker-results");
+        if (!visible || !hidden || !resultados) return;
+
+        visible.addEventListener("input", () => {
+            hidden.value = "";
+            const texto = textoNormalizado(visible.value);
+            if (texto.length < 2) {
+                resultados.innerHTML = "";
+                resultados.classList.remove("active");
+                return;
+            }
+
+            const coincidencias = empresasData
+                .filter((empresa) => textoNormalizado((empresa.razon || "") + " " + (empresa.cuit || "")).includes(texto))
+                .slice(0, 30);
+
+            resultados.innerHTML = coincidencias.length
+                ? coincidencias.map((empresa) => `<div class="empresa-picker-option" data-id="${escapeHtml(empresa.id || "")}">${escapeHtml(etiquetaEmpresa(empresa))}</div>`).join("")
+                : '<div class="empresa-picker-option sin">Sin coincidencias</div>';
+            resultados.classList.add("active");
+
+            resultados.querySelectorAll(".empresa-picker-option[data-id]").forEach((opcion) => {
+                opcion.addEventListener("click", () => {
+                    seleccionarEmpresaPicker(hidden.name, opcion.dataset.id);
+                    if (hidden.name === "acuerdo_empresa_id") cargarAcuerdoExistente();
+                });
+            });
+        });
+
+        visible.addEventListener("focus", () => {
+            if (visible.value.length >= 2 && resultados.innerHTML) resultados.classList.add("active");
+        });
+    });
+
+    document.addEventListener("click", (event) => {
+        if (event.target.closest(".empresa-picker")) return;
+        document.querySelectorAll(".empresa-picker-results").forEach((resultados) => resultados.classList.remove("active"));
+    });
 }
 
 function configurarTabs() {
@@ -1435,7 +1516,6 @@ function completarFormularioPago(empresaId, tipo, periodo) {
     if (form) {
         const pagoId = form.querySelector('input[name="pago_id"]');
         const comprobanteActual = form.querySelector('input[name="comprobante_actual"]');
-        const empresa = form.querySelector('select[name="empresa_id"]');
         const tipoInput = form.querySelector('select[name="tipo"]');
         const periodoInput = form.querySelector('input[name="periodo"]');
         const monto = form.querySelector('input[name="monto"]');
@@ -1444,7 +1524,7 @@ function completarFormularioPago(empresaId, tipo, periodo) {
 
         if (pagoId) pagoId.value = "";
         if (comprobanteActual) comprobanteActual.value = "";
-        if (empresa) empresa.value = empresaId;
+        seleccionarEmpresaPicker("empresa_id", empresaId);
         if (tipoInput) tipoInput.value = tipo;
         if (periodoInput) periodoInput.value = periodo;
         if (titulo) titulo.textContent = "Cargar pago";
@@ -1462,9 +1542,8 @@ function completarFormularioAcuerdo(empresaId, tipo) {
 
     const form = document.getElementById("acuerdoForm");
     if (form) {
-        const empresa = form.querySelector('select[name="acuerdo_empresa_id"]');
         const tipoInput = form.querySelector('select[name="acuerdo_tipo"]');
-        if (empresa) empresa.value = empresaId;
+        seleccionarEmpresaPicker("acuerdo_empresa_id", empresaId);
         if (tipoInput && tipo) tipoInput.value = tipo;
         cargarAcuerdoExistente();
     }
@@ -1475,7 +1554,7 @@ function completarFormularioAcuerdo(empresaId, tipo) {
 function cargarAcuerdoExistente() {
     const form = document.getElementById("acuerdoForm");
     if (!form) return;
-    const empresaId = form.querySelector('select[name="acuerdo_empresa_id"]')?.value || "";
+    const empresaId = form.querySelector('input[name="acuerdo_empresa_id"]')?.value || "";
     const tipo = form.querySelector('select[name="acuerdo_tipo"]')?.value || "";
     const empresa = obtenerEmpresa(empresaId);
     if (!empresa || !tipo) return;
@@ -1675,7 +1754,7 @@ function configurarBuscadoresEmpresa() {
         fichaInput.addEventListener("input", () => renderResultadosEmpresa(fichaInput, fichaResultados, 20));
     }
 
-    const acuerdoEmpresa = document.getElementById("acuerdoEmpresa");
+    const acuerdoEmpresa = document.querySelector('input[name="acuerdo_empresa_id"]');
     const acuerdoTipo = document.getElementById("acuerdoTipo");
     if (acuerdoEmpresa) acuerdoEmpresa.addEventListener("change", cargarAcuerdoExistente);
     if (acuerdoTipo) acuerdoTipo.addEventListener("change", cargarAcuerdoExistente);
@@ -1683,6 +1762,7 @@ function configurarBuscadoresEmpresa() {
 
 configurarTabs();
 configurarCardsPlegables();
+configurarEmpresaPickers();
 configurarBuscadoresEmpresa();
 configurarInformePeriodo();
 configurarFiltrosEmpresas();
