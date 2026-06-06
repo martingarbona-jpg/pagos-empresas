@@ -81,6 +81,21 @@ function buscarEmpresa($empresas, $id) {
     return null;
 }
 
+function existePagoEmpresaTipoPeriodo($pagos, $empresaId, $tipo, $periodo, $pagoIdIgnorado = "") {
+    $periodoNormalizado = periodoParaInput($periodo);
+    foreach ($pagos as $pago) {
+        if ($pagoIdIgnorado !== "" && ($pago["id"] ?? "") === $pagoIdIgnorado) continue;
+        if (
+            ($pago["empresa_id"] ?? "") === $empresaId &&
+            ($pago["tipo"] ?? "") === $tipo &&
+            periodoParaInput($pago["periodo"] ?? "") === $periodoNormalizado
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
 function totalPagado($pagos, $empresaId, $tipo) {
     $total = 0;
     foreach ($pagos as $p) {
@@ -295,12 +310,17 @@ if (isset($_POST["guardar_acuerdo"])) {
 }
 
 if (isset($_POST["guardar_pago"])) {
-    $id = $_POST["pago_id"] ?: uniqid("pago_");
+    $pagoIdActual = trim($_POST["pago_id"] ?? "");
+    $id = $pagoIdActual !== "" ? $pagoIdActual : uniqid("pago_");
     $comprobante = $_POST["comprobante_actual"] ?? "";
     $periodo = trim($_POST["periodo"] ?? "");
+    $empresaIdPago = $_POST["empresa_id"] ?? "";
+    $tipoPago = $_POST["tipo"] ?? "";
 
     if (!periodoValido($periodo)) {
         $errorPago = "El periodo debe tener formato MM/AA.";
+    } elseif (existePagoEmpresaTipoPeriodo($pagos, $empresaIdPago, $tipoPago, $periodo, $pagoIdActual)) {
+        $errorPago = "Ya existe un pago cargado para esta empresa, este tipo y este período. Revisá los pagos registrados antes de cargarlo nuevamente.";
     } elseif (!empty($_FILES["comprobante"]["name"])) {
         $ext = strtolower(pathinfo($_FILES["comprobante"]["name"], PATHINFO_EXTENSION));
         $permitidos = ["pdf", "jpg", "jpeg", "png"];
@@ -691,6 +711,8 @@ th{background:#087a46;color:white}
 <input type="text" name="periodo" class="periodo-input" placeholder="MM/AA" maxlength="5" inputmode="numeric" pattern="(0[1-9]|1[0-2])\/[0-9]{2}" required value="<?= e(periodoParaInput($editarPago["periodo"] ?? "")) ?>">
 <input type="file" name="comprobante" accept=".pdf,.jpg,.jpeg,.png">
 </div>
+
+<p id="avisoPagoDuplicado" class="error" style="display:none"></p>
 
 <?php if($errorPago !== ""): ?>
 <p class="error"><?= e($errorPago) ?></p>
@@ -1261,11 +1283,60 @@ if (registrarCuotasPrevias && acuerdoFormEl) {
     });
 }
 
+const mensajePagoDuplicado = "Ya existe un pago cargado para esta empresa, este tipo y este período. Revisá los pagos registrados antes de cargarlo nuevamente.";
+
+function buscarPagoDuplicado(empresaId, tipo, periodo, pagoIdIgnorado = "") {
+    const periodoBuscado = periodoNormalizado(periodo);
+    if (!empresaId || !tipo || !periodoValidoCliente(periodoBuscado)) return null;
+
+    return pagosData.find((pago) =>
+        (pago.id || "") !== pagoIdIgnorado &&
+        (pago.empresa_id || "") === empresaId &&
+        (pago.tipo || "") === tipo &&
+        periodoNormalizado(pago.periodo || "") === periodoBuscado
+    ) || null;
+}
+
 const pagoForm = document.querySelector('form[enctype="multipart/form-data"]');
 if (pagoForm) {
+    const empresaIdInput = pagoForm.querySelector('input[name="empresa_id"]');
+    const tipoInput = pagoForm.querySelector('select[name="tipo"]');
+    const periodoInput = pagoForm.querySelector('input[name="periodo"]');
+    const pagoIdInput = pagoForm.querySelector('input[name="pago_id"]');
+    const avisoDuplicado = document.getElementById("avisoPagoDuplicado");
+    let claveDuplicadaAvisada = "";
+
+    const validarDuplicadoCliente = (mostrarAlerta = false) => {
+        const empresaId = empresaIdInput?.value || "";
+        const tipo = tipoInput?.value || "";
+        const periodo = periodoInput?.value || "";
+        const pagoId = pagoIdInput?.value || "";
+        const duplicado = buscarPagoDuplicado(empresaId, tipo, periodo, pagoId);
+        const clave = duplicado ? `${empresaId}|${tipo}|${periodoNormalizado(periodo)}` : "";
+
+        if (avisoDuplicado) {
+            avisoDuplicado.textContent = duplicado ? mensajePagoDuplicado : "";
+            avisoDuplicado.style.display = duplicado ? "block" : "none";
+        }
+
+        if (duplicado && mostrarAlerta && claveDuplicadaAvisada !== clave) {
+            alert(mensajePagoDuplicado);
+            claveDuplicadaAvisada = clave;
+        } else if (!duplicado) {
+            claveDuplicadaAvisada = "";
+        }
+
+        return duplicado;
+    };
+
+    empresaIdInput?.addEventListener("change", () => validarDuplicadoCliente(true));
+    tipoInput?.addEventListener("change", () => validarDuplicadoCliente(true));
+    periodoInput?.addEventListener("change", () => validarDuplicadoCliente(true));
+    periodoInput?.addEventListener("input", () => validarDuplicadoCliente(false));
+
     pagoForm.addEventListener("submit", (event) => {
-        const empresaId = pagoForm.querySelector('input[name="empresa_id"]')?.value || "";
-        const periodo = pagoForm.querySelector('input[name="periodo"]');
+        const empresaId = empresaIdInput?.value || "";
+        const periodo = periodoInput;
         if (!empresaId) {
             event.preventDefault();
             alert("Seleccioná una empresa desde el buscador.");
@@ -1276,8 +1347,16 @@ if (pagoForm) {
             event.preventDefault();
             alert("El periodo debe tener formato MM/AA.");
             periodo.focus();
+            return;
+        }
+        if (validarDuplicadoCliente(false)) {
+            event.preventDefault();
+            alert(mensajePagoDuplicado);
+            periodo?.focus();
         }
     });
+
+    validarDuplicadoCliente(false);
 }
 
 function textoNormalizado(valor) {
@@ -1461,7 +1540,10 @@ function seleccionarEmpresaPicker(hiddenName, empresaId) {
     const hidden = picker.querySelector(".empresa-picker-hidden");
     const resultados = picker.querySelector(".empresa-picker-results");
     if (visible) visible.value = etiquetaEmpresa(empresa);
-    if (hidden) hidden.value = empresa.id || "";
+    if (hidden) {
+        hidden.value = empresa.id || "";
+        hidden.dispatchEvent(new Event("change", { bubbles: true }));
+    }
     if (resultados) {
         resultados.innerHTML = "";
         resultados.classList.remove("active");
@@ -1477,6 +1559,7 @@ function configurarEmpresaPickers() {
 
         visible.addEventListener("input", () => {
             hidden.value = "";
+            hidden.dispatchEvent(new Event("change", { bubbles: true }));
             const texto = textoNormalizado(visible.value);
             if (texto.length < 2) {
                 resultados.innerHTML = "";
@@ -1717,6 +1800,11 @@ function ultimoPagoEmpresaTipo(empresaId, tipo) {
 }
 
 function completarFormularioPago(empresaId, tipo, periodo) {
+    if (buscarPagoDuplicado(empresaId, tipo, periodo)) {
+        alert(mensajePagoDuplicado);
+        return;
+    }
+
     activarTab("cargar-pago");
     const card = document.getElementById("cargar-pago");
     abrirCard(card);
@@ -1964,6 +2052,7 @@ function configurarInformePeriodo() {
         } else {
             noPagaronBody.innerHTML = deudores.map(({ empresa, tipo, plan, esperado }) => {
                 const ultimoPago = ultimoPagoEmpresaTipo(empresa.id || "", tipo);
+                const pagoYaCargado = buscarPagoDuplicado(empresa.id || "", tipo, periodo);
                 const ultimo = ultimoPago
                     ? `${escapeHtml(periodoNormalizado(ultimoPago.periodo))} - ${escapeHtml(ultimoPago.fecha || "")} - ${dineroCliente(ultimoPago.monto)}`
                     : '<span class="sin">Sin pagos previos</span>';
@@ -1976,7 +2065,9 @@ function configurarInformePeriodo() {
 <td>${escapeHtml(periodoAcuerdoEmpresa(empresa, tipo) || periodo)}</td>
 <td>${ultimo}</td>
 <td><span class="estado estado-deudor">DEUDOR</span></td>
-<td><button type="button" class="btn-small cargar-pago-informe" data-empresa="${escapeHtml(empresa.id || "")}" data-tipo="${escapeHtml(tipo)}" data-periodo="${escapeHtml(periodo)}">Cargar pago</button></td>
+<td>${pagoYaCargado
+    ? '<button type="button" class="btn-small" disabled title="Ya existe un pago para esta empresa, tipo y período">Pago ya cargado</button>'
+    : `<button type="button" class="btn-small cargar-pago-informe" data-empresa="${escapeHtml(empresa.id || "")}" data-tipo="${escapeHtml(tipo)}" data-periodo="${escapeHtml(periodo)}">Cargar pago</button>`}</td>
 </tr>`;
             }).join("");
 
