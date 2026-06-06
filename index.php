@@ -666,7 +666,13 @@ button{background:#087a46;color:white;border:0;font-weight:bold;cursor:pointer}
 .estado-parcial{background:#fff4df;color:#b76500}
 .estado-deudor{background:#fde7eb;color:#b00020}
 table{width:100%;border-collapse:collapse}
-thead,th{position:static;top:auto}
+table thead,
+table th,
+thead th{
+    position:static !important;
+    top:auto !important;
+    z-index:auto !important;
+}
 th,td{padding:10px;border-bottom:1px solid #ddd;text-align:left;font-size:14px}
 th{background:#087a46;color:white}
 .acciones a{text-decoration:none;margin-right:8px;font-size:18px}
