@@ -81,6 +81,83 @@ function buscarEmpresa($empresas, $id) {
     return null;
 }
 
+function formaSocietariaEmpresa($razon) {
+    $texto = strtoupper(strtr(trim($razon ?? ""), [
+        "Á" => "A", "É" => "E", "Í" => "I", "Ó" => "O", "Ú" => "U", "Ü" => "U", "Ñ" => "N",
+        "á" => "A", "é" => "E", "í" => "I", "ó" => "O", "ú" => "U", "ü" => "U", "ñ" => "N"
+    ]));
+    if (preg_match('/(?:^|[^A-Z0-9])S\s*\.?\s*A\s*\.?\s*S\s*\.?\s*$/', $texto)) return "SAS";
+    if (preg_match('/(?:^|[^A-Z0-9])S\s*\.?\s*R\s*\.?\s*L\s*\.?\s*$/', $texto)) return "SRL";
+    if (preg_match('/(?:^|[^A-Z0-9])S\s*\.?\s*A\s*\.?\s*$/', $texto)) return "SA";
+    return "";
+}
+
+function normalizarRazonSocial($razon) {
+    $texto = strtr(trim($razon ?? ""), [
+        "Á" => "A", "É" => "E", "Í" => "I", "Ó" => "O", "Ú" => "U", "Ü" => "U", "Ñ" => "N",
+        "á" => "a", "é" => "e", "í" => "i", "ó" => "o", "ú" => "u", "ü" => "u", "ñ" => "n"
+    ]);
+    $texto = strtolower($texto);
+    $texto = preg_replace('/[^a-z0-9]+/', ' ', $texto);
+    $texto = preg_replace('/\b(?:s\s*a\s*s|s\s*r\s*l|s\s*a|sas|srl|sa)\b/', ' ', $texto);
+    return trim(preg_replace('/\s+/', ' ', $texto));
+}
+
+function claveExactaRazonSocial($razon) {
+    return normalizarRazonSocial($razon) . "|" . formaSocietariaEmpresa($razon);
+}
+
+function normalizarCuit($cuit) {
+    return preg_replace('/\D+/', '', trim($cuit ?? ""));
+}
+
+function palabrasImportantesRazon($razon) {
+    return array_values(array_unique(array_filter(
+        explode(" ", normalizarRazonSocial($razon)),
+        fn($palabra) => strlen($palabra) >= 3
+    )));
+}
+
+function razonesParecidas($razonA, $razonB) {
+    $a = normalizarRazonSocial($razonA);
+    $b = normalizarRazonSocial($razonB);
+    if ($a === "" || $b === "") return false;
+    if ($a === $b) return true;
+    if (strpos($a, $b) !== false || strpos($b, $a) !== false) return true;
+
+    return count(array_intersect(palabrasImportantesRazon($a), palabrasImportantesRazon($b))) >= 2;
+}
+
+function buscarCoincidenciasEmpresa($empresas, $razon, $cuit, $idIgnorado = "") {
+    $resultado = ["cuit" => null, "exacta" => null, "parecidas" => []];
+    $cuitNormalizado = normalizarCuit($cuit);
+    $claveExacta = claveExactaRazonSocial($razon);
+
+    foreach ($empresas as $empresa) {
+        if ($idIgnorado !== "" && ($empresa["id"] ?? "") === $idIgnorado) continue;
+
+        if (
+            !$resultado["cuit"] &&
+            $cuitNormalizado !== "" &&
+            normalizarCuit($empresa["cuit"] ?? "") === $cuitNormalizado
+        ) {
+            $resultado["cuit"] = $empresa;
+        }
+
+        if (
+            !$resultado["exacta"] &&
+            normalizarRazonSocial($empresa["razon"] ?? "") !== "" &&
+            claveExactaRazonSocial($empresa["razon"] ?? "") === $claveExacta
+        ) {
+            $resultado["exacta"] = $empresa;
+        } elseif (razonesParecidas($razon, $empresa["razon"] ?? "")) {
+            $resultado["parecidas"][] = $empresa;
+        }
+    }
+
+    return $resultado;
+}
+
 function existePagoEmpresaTipoPeriodo($pagos, $empresaId, $tipo, $periodo, $pagoIdIgnorado = "") {
     $periodoNormalizado = periodoParaInput($periodo);
     foreach ($pagos as $pago) {
@@ -272,22 +349,38 @@ button{background:#087a46;color:white;border:0;font-weight:bold;cursor:pointer}
 $empresas = leerJson($empresasFile);
 $pagos = leerJson($pagosFile);
 $errorEmpresa = "";
+$coincidenciasEmpresa = ["cuit" => null, "exacta" => null, "parecidas" => []];
+$advertenciaEmpresa = false;
 $errorPago = "";
 
 if (isset($_POST["guardar_empresa"])) {
     $id = $_POST["empresa_id"] ?: uniqid("emp_");
     $empresaExistente = buscarEmpresa($empresas, $id);
+    $razonEmpresa = trim($_POST["razon"] ?? "");
+    $cuitEmpresa = trim($_POST["cuit"] ?? "");
+    $coincidenciasEmpresa = buscarCoincidenciasEmpresa($empresas, $razonEmpresa, $cuitEmpresa, $_POST["empresa_id"] ?? "");
 
     $nueva = [
         "id" => $id,
-        "razon" => trim($_POST["razon"] ?? ""),
-        "cuit" => trim($_POST["cuit"] ?? ""),
+        "razon" => $razonEmpresa,
+        "cuit" => $cuitEmpresa,
         "deuda_os" => floatval($empresaExistente["deuda_os"] ?? 0),
         "deuda_sindicato" => floatval($empresaExistente["deuda_sindicato"] ?? 0),
         "deuda_mutual" => floatval($empresaExistente["deuda_mutual"] ?? 0),
         "observaciones" => trim($_POST["observaciones_empresa"] ?? ""),
         "fecha_carga" => date("Y-m-d H:i:s")
     ];
+
+    if ($razonEmpresa === "") {
+        $errorEmpresa = "La razón social es obligatoria.";
+    } elseif ($coincidenciasEmpresa["cuit"]) {
+        $errorEmpresa = "Ya existe una empresa cargada con ese CUIT.";
+    } elseif ($coincidenciasEmpresa["exacta"]) {
+        $errorEmpresa = "Esta empresa ya parece estar cargada.";
+    } elseif (!empty($coincidenciasEmpresa["parecidas"]) && empty($_POST["confirmar_empresa_parecida"])) {
+        $advertenciaEmpresa = true;
+        $errorEmpresa = "Hay empresas parecidas ya cargadas. Revisá antes de guardar para evitar duplicados.";
+    }
 
     if ($errorEmpresa === "") {
         $editado = false;
@@ -740,6 +833,12 @@ th{background:#087a46;color:white}
 .saldo-ok{color:#087a46;font-weight:bold}
 .saldo-debe{color:#b00020;font-weight:bold}
 .error{color:#b00020;font-weight:bold}
+.empresa-duplicados{margin:14px 0;padding:14px;border-radius:12px;background:#fff7e6;border:1px solid #e2b75b}
+.empresa-duplicados.bloqueo{background:#fdebed;border-color:#d98b98}
+.empresa-duplicados p{margin:0 0 10px}
+.empresa-coincidencia{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0;border-top:1px solid #0001}
+.empresa-coincidencia:first-of-type{border-top:0}
+.empresa-coincidencia button{width:auto;white-space:nowrap}
 .fila-oculta{display:none}
 @media(max-width:1000px){.grid,.resumen,.home-actions,.empresa-ficha-grid,.filters-grid,.filters-grid.empresas,.filters-grid.informe,.informe-resumen,.resumen-acuerdo-grid{grid-template-columns:1fr}table{display:block;overflow-x:auto}}
 </style>
@@ -796,6 +895,7 @@ th{background:#087a46;color:white}
 
 <form method="post" id="empresaForm">
 <input type="hidden" name="empresa_id" value="<?= e($editarEmpresa["id"] ?? "") ?>">
+<input type="hidden" name="confirmar_empresa_parecida" id="confirmarEmpresaParecida" value="<?= $advertenciaEmpresa ? "1" : "" ?>">
 
 <div class="grid">
 <div class="campo">
@@ -813,12 +913,30 @@ th{background:#087a46;color:white}
 <textarea id="empresaObservaciones" name="observaciones_empresa" placeholder="Observaciones empresa"><?= e($editarEmpresa["observaciones"] ?? "") ?></textarea>
 </div>
 
+<div id="empresaDuplicadosCliente"></div>
+
 <?php if($errorEmpresa !== ""): ?>
+<div class="empresa-duplicados <?= $advertenciaEmpresa ? "" : "bloqueo" ?>">
 <p class="error"><?= e($errorEmpresa) ?></p>
+<?php
+$empresasMostradas = [];
+if ($coincidenciasEmpresa["cuit"]) $empresasMostradas[] = $coincidenciasEmpresa["cuit"];
+if ($coincidenciasEmpresa["exacta"] && (!$coincidenciasEmpresa["cuit"] || ($coincidenciasEmpresa["exacta"]["id"] ?? "") !== ($coincidenciasEmpresa["cuit"]["id"] ?? ""))) {
+    $empresasMostradas[] = $coincidenciasEmpresa["exacta"];
+}
+if ($advertenciaEmpresa) $empresasMostradas = $coincidenciasEmpresa["parecidas"];
+?>
+<?php foreach($empresasMostradas as $coincidencia): ?>
+<div class="empresa-coincidencia">
+<span><strong><?= e($coincidencia["razon"] ?? "") ?></strong><?= !empty($coincidencia["cuit"]) ? " · CUIT " . e($coincidencia["cuit"]) : "" ?></span>
+<button type="button" class="ver-empresa-coincidente" data-empresa="<?= e($coincidencia["id"] ?? "") ?>"><?= $advertenciaEmpresa ? "Ver ficha" : "Ver empresa existente" ?></button>
+</div>
+<?php endforeach; ?>
+</div>
 <?php endif; ?>
 
 <br><br>
-<button name="guardar_empresa"><?= $editarEmpresa ? "Guardar cambios empresa" : "Guardar empresa" ?></button>
+<button name="guardar_empresa" id="guardarEmpresa"><?= $advertenciaEmpresa ? "Guardar de todos modos" : ($editarEmpresa ? "Guardar cambios empresa" : "Guardar empresa") ?></button>
 <?php if($editarEmpresa): ?>
 <a class="btn-cancelar" href="index.php">Cancelar</a>
 <?php endif; ?>
@@ -1654,6 +1772,153 @@ function normalizarTexto(valor) {
         .replace(/[^a-z0-9]/g, " ")
         .replace(/\s+/g, " ")
         .trim();
+}
+
+function formaSocietariaRazon(valor) {
+    const texto = (valor || "").toString().trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    if (/(?:^|[^A-Z0-9])S\s*\.?\s*A\s*\.?\s*S\s*\.?\s*$/.test(texto)) return "SAS";
+    if (/(?:^|[^A-Z0-9])S\s*\.?\s*R\s*\.?\s*L\s*\.?\s*$/.test(texto)) return "SRL";
+    if (/(?:^|[^A-Z0-9])S\s*\.?\s*A\s*\.?\s*$/.test(texto)) return "SA";
+    return "";
+}
+
+function normalizarRazonEmpresa(valor) {
+    return normalizarTexto(valor)
+        .replace(/\b(?:s a s|s r l|s a|sas|srl|sa)\b/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+function claveExactaRazonEmpresa(valor) {
+    return `${normalizarRazonEmpresa(valor)}|${formaSocietariaRazon(valor)}`;
+}
+
+function palabrasImportantesEmpresa(valor) {
+    return [...new Set(normalizarRazonEmpresa(valor).split(" ").filter((palabra) => palabra.length >= 3))];
+}
+
+function razonesEmpresasParecidas(a, b) {
+    const razonA = normalizarRazonEmpresa(a);
+    const razonB = normalizarRazonEmpresa(b);
+    if (!razonA || !razonB) return false;
+    if (razonA === razonB || razonA.includes(razonB) || razonB.includes(razonA)) return true;
+    const palabrasB = new Set(palabrasImportantesEmpresa(razonB));
+    return palabrasImportantesEmpresa(razonA).filter((palabra) => palabrasB.has(palabra)).length >= 2;
+}
+
+function coincidenciasFormularioEmpresa(razon, cuit, empresaId = "") {
+    const cuitNormalizado = (cuit || "").replace(/\D/g, "");
+    const claveExacta = claveExactaRazonEmpresa(razon);
+    let coincidenciaCuit = null;
+    let coincidenciaExacta = null;
+    const parecidas = [];
+
+    empresasData.forEach((empresa) => {
+        if ((empresa.id || "") === empresaId) return;
+        const cuitExistente = (empresa.cuit || "").replace(/\D/g, "");
+        if (!coincidenciaCuit && cuitNormalizado && cuitExistente === cuitNormalizado) coincidenciaCuit = empresa;
+
+        if (
+            !coincidenciaExacta &&
+            normalizarRazonEmpresa(empresa.razon || "") &&
+            claveExactaRazonEmpresa(empresa.razon || "") === claveExacta
+        ) {
+            coincidenciaExacta = empresa;
+        } else if (razonesEmpresasParecidas(razon, empresa.razon || "")) {
+            parecidas.push(empresa);
+        }
+    });
+
+    return { cuit: coincidenciaCuit, exacta: coincidenciaExacta, parecidas };
+}
+
+function abrirFichaEmpresaCoincidente(empresaId) {
+    activarTab("buscar-empresa");
+    seleccionarEmpresaFicha(empresaId);
+    document.getElementById("fichaEmpresa")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function configurarControlDuplicadosEmpresa() {
+    const form = document.getElementById("empresaForm");
+    if (!form) return;
+
+    const razon = document.getElementById("empresaRazon");
+    const cuit = document.getElementById("empresaCuit");
+    const empresaId = form.querySelector('input[name="empresa_id"]');
+    const confirmar = document.getElementById("confirmarEmpresaParecida");
+    const panel = document.getElementById("empresaDuplicadosCliente");
+    const guardar = document.getElementById("guardarEmpresa");
+    let ultimaFirma = `${razon?.value.trim() || ""}|${cuit?.value || ""}`;
+
+    const filaEmpresa = (empresa, etiqueta) => `<div class="empresa-coincidencia">
+        <span><strong>${escapeHtml(empresa.razon || "")}</strong>${empresa.cuit ? ` · CUIT ${escapeHtml(empresa.cuit)}` : ""}</span>
+        <button type="button" class="ver-empresa-coincidente" data-empresa="${escapeHtml(empresa.id || "")}">${etiqueta}</button>
+    </div>`;
+
+    const conectarBotones = () => {
+        panel?.querySelectorAll(".ver-empresa-coincidente").forEach((boton) => {
+            boton.addEventListener("click", () => abrirFichaEmpresaCoincidente(boton.dataset.empresa || ""));
+        });
+    };
+
+    const evaluar = () => {
+        const nombre = razon?.value.trim() || "";
+        const firma = `${nombre}|${cuit?.value || ""}`;
+        if (firma !== ultimaFirma && confirmar) confirmar.value = "";
+        ultimaFirma = firma;
+
+        if (!nombre) {
+            if (panel) panel.innerHTML = "";
+            return { bloqueada: false, parecidas: [] };
+        }
+
+        const coincidencias = coincidenciasFormularioEmpresa(nombre, cuit?.value || "", empresaId?.value || "");
+        if (coincidencias.cuit) {
+            if (panel) panel.innerHTML = `<div class="empresa-duplicados bloqueo"><p class="error">Ya existe una empresa cargada con ese CUIT.</p>${filaEmpresa(coincidencias.cuit, "Ver empresa existente")}</div>`;
+            conectarBotones();
+            return { bloqueada: true, parecidas: [] };
+        }
+        if (coincidencias.exacta) {
+            if (panel) panel.innerHTML = `<div class="empresa-duplicados bloqueo"><p class="error">Esta empresa ya parece estar cargada.</p>${filaEmpresa(coincidencias.exacta, "Ver empresa existente")}</div>`;
+            conectarBotones();
+            return { bloqueada: true, parecidas: [] };
+        }
+        if (coincidencias.parecidas.length) {
+            if (panel) panel.innerHTML = `<div class="empresa-duplicados"><p><strong>Hay empresas parecidas ya cargadas. Revisá antes de guardar para evitar duplicados.</strong></p>
+                ${coincidencias.parecidas.slice(0, 10).map((empresa) => filaEmpresa(empresa, "Ver ficha")).join("")}
+                <button type="button" id="confirmarGuardarEmpresa">Guardar de todos modos</button>
+            </div>`;
+            conectarBotones();
+            document.getElementById("confirmarGuardarEmpresa")?.addEventListener("click", () => {
+                if (confirmar) confirmar.value = "1";
+                form.requestSubmit(guardar);
+            });
+            return { bloqueada: false, parecidas: coincidencias.parecidas };
+        }
+
+        if (panel) panel.innerHTML = "";
+        return { bloqueada: false, parecidas: [] };
+    };
+
+    razon?.addEventListener("input", evaluar);
+    cuit?.addEventListener("input", evaluar);
+    form.addEventListener("submit", (event) => {
+        const resultado = evaluar();
+        if (resultado.bloqueada) {
+            event.preventDefault();
+            panel?.scrollIntoView({ behavior: "smooth", block: "center" });
+            return;
+        }
+        if (resultado.parecidas.length && confirmar?.value !== "1") {
+            event.preventDefault();
+            panel?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+    });
+
+    document.querySelectorAll(".ver-empresa-coincidente").forEach((boton) => {
+        boton.addEventListener("click", () => abrirFichaEmpresaCoincidente(boton.dataset.empresa || ""));
+    });
+    evaluar();
 }
 
 function distanciaEdicion(a, b) {
@@ -2502,6 +2767,7 @@ function configurarBuscadoresEmpresa() {
 
 configurarTabs();
 configurarCardsPlegables();
+configurarControlDuplicadosEmpresa();
 configurarEmpresaPickers();
 configurarBuscadoresEmpresa();
 configurarInformePeriodo();
