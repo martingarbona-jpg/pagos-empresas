@@ -146,6 +146,52 @@ function acuerdoEmpresa($empresa, $tipo) {
     return $base;
 }
 
+function acuerdoValidoEmpresaTipo($empresa, $tipo) {
+    $acuerdo = acuerdoEmpresa($empresa, $tipo);
+    return intval($acuerdo["cantidad_cuotas"] ?? 0) >= 2
+        && floatval($acuerdo["monto_total"] ?? 0) > 0
+        && floatval($acuerdo["monto_cuota"] ?? 0) > 0
+        && periodoValido(periodoParaInput($acuerdo["periodo_desde"] ?? ""))
+        && periodoValido(periodoParaInput($acuerdo["periodo_hasta"] ?? ""));
+}
+
+function periodoPerteneceAcuerdo($acuerdo, $periodo) {
+    $consultado = periodoAIndice(periodoParaInput($periodo));
+    $desde = periodoAIndice(periodoParaInput($acuerdo["periodo_desde"] ?? ""));
+    $hasta = periodoAIndice(periodoParaInput($acuerdo["periodo_hasta"] ?? ""));
+    return $consultado !== null && $desde !== null && $hasta !== null
+        && $consultado >= $desde && $consultado <= $hasta;
+}
+
+function periodoEsCuotaPrevia($acuerdo, $periodo) {
+    $consultado = periodoAIndice(periodoParaInput($periodo));
+    $desde = periodoAIndice(periodoParaInput($acuerdo["periodo_desde"] ?? ""));
+    $previas = max(intval($acuerdo["cuotas_pagadas_previas"] ?? 0), 0);
+    if ($consultado === null || $desde === null) return false;
+    $numeroCuota = $consultado - $desde + 1;
+    return $numeroCuota >= 1 && $numeroCuota <= $previas;
+}
+
+function tipoPagoCompatible($pago, $empresas) {
+    if (in_array($pago["tipo_pago"] ?? "", ["Pago único", "Cuota de acuerdo"], true)) {
+        return $pago["tipo_pago"];
+    }
+    if (($pago["pago_tipo"] ?? "") === "Cuotas") {
+        return "Cuota de acuerdo";
+    }
+    if (($pago["pago_tipo"] ?? "") === "Pago total") {
+        return "Pago único";
+    }
+    $empresa = buscarEmpresa($empresas, $pago["empresa_id"] ?? "");
+    if ($empresa && acuerdoValidoEmpresaTipo($empresa, $pago["tipo"] ?? "")) {
+        $acuerdo = acuerdoEmpresa($empresa, $pago["tipo"] ?? "");
+        if (periodoPerteneceAcuerdo($acuerdo, $pago["periodo"] ?? "")) {
+            return "Cuota de acuerdo";
+        }
+    }
+    return "Pago único";
+}
+
 function resumenAcuerdosEmpresa($empresa) {
     $partes = [];
     foreach (["Obra Social","Sindicato","Mutual"] as $tipo) {
@@ -213,14 +259,15 @@ $errorPago = "";
 
 if (isset($_POST["guardar_empresa"])) {
     $id = $_POST["empresa_id"] ?: uniqid("emp_");
+    $empresaExistente = buscarEmpresa($empresas, $id);
 
     $nueva = [
         "id" => $id,
         "razon" => trim($_POST["razon"] ?? ""),
         "cuit" => trim($_POST["cuit"] ?? ""),
-        "deuda_os" => floatval($_POST["deuda_os"] ?? 0),
-        "deuda_sindicato" => floatval($_POST["deuda_sindicato"] ?? 0),
-        "deuda_mutual" => floatval($_POST["deuda_mutual"] ?? 0),
+        "deuda_os" => floatval($empresaExistente["deuda_os"] ?? 0),
+        "deuda_sindicato" => floatval($empresaExistente["deuda_sindicato"] ?? 0),
+        "deuda_mutual" => floatval($empresaExistente["deuda_mutual"] ?? 0),
         "observaciones" => trim($_POST["observaciones_empresa"] ?? ""),
         "fecha_carga" => date("Y-m-d H:i:s")
     ];
@@ -231,7 +278,7 @@ if (isset($_POST["guardar_empresa"])) {
             if (($emp["id"] ?? "") === $id) {
                 $nueva["fecha_carga"] = $emp["fecha_carga"] ?? date("Y-m-d H:i:s");
                 $nueva["acuerdos"] = $emp["acuerdos"] ?? [];
-                foreach (["monto_total","cantidad_cuotas","monto_cuota","periodo_desde","periodo_hasta","observaciones_acuerdo"] as $campoViejo) {
+                foreach (["monto_total","cantidad_cuotas","monto_cuota","cuotas_pagadas_previas","periodo_desde","periodo_hasta","observaciones_acuerdo"] as $campoViejo) {
                     if (isset($emp[$campoViejo])) $nueva[$campoViejo] = $emp[$campoViejo];
                 }
                 $empresas[$k] = $nueva;
@@ -265,7 +312,7 @@ if (isset($_POST["guardar_acuerdo"])) {
     } elseif ($montoTotalAcuerdo <= 0) {
         $errorEmpresa = "El monto total de la deuda debe ser mayor a 0.";
     } elseif ($cantidadCuotasAcuerdo < 2) {
-        $errorEmpresa = "La cantidad total de cuotas debe ser como mínimo 2. Para un pago único usá Cargar pago.";
+        $errorEmpresa = "Para pago único usá la pestaña Cargar pago. Un acuerdo debe tener 2 cuotas o más.";
     } elseif ($montoCuotaAcuerdo <= 0) {
         $errorEmpresa = "El monto de cada cuota debe ser mayor a 0.";
     } elseif ($cuotasPreviasAcuerdo < 0) {
@@ -316,9 +363,19 @@ if (isset($_POST["guardar_pago"])) {
     $periodo = trim($_POST["periodo"] ?? "");
     $empresaIdPago = $_POST["empresa_id"] ?? "";
     $tipoPago = $_POST["tipo"] ?? "";
+    $tipoDePago = $_POST["tipo_pago"] ?? "";
+    $empresaPago = buscarEmpresa($empresas, $empresaIdPago);
 
-    if (!periodoValido($periodo)) {
+    if (!in_array($tipoDePago, ["Pago único", "Cuota de acuerdo"], true)) {
+        $errorPago = "Seleccioná un tipo de pago válido.";
+    } elseif (!periodoValido($periodo)) {
         $errorPago = "El periodo debe tener formato MM/AA.";
+    } elseif ($tipoDePago === "Cuota de acuerdo" && (!$empresaPago || !acuerdoValidoEmpresaTipo($empresaPago, $tipoPago))) {
+        $errorPago = "Para cargar una cuota debe existir un acuerdo para esta empresa y este tipo.";
+    } elseif ($tipoDePago === "Cuota de acuerdo" && !periodoPerteneceAcuerdo(acuerdoEmpresa($empresaPago, $tipoPago), $periodo)) {
+        $errorPago = "El período seleccionado no pertenece al acuerdo.";
+    } elseif ($tipoDePago === "Cuota de acuerdo" && periodoEsCuotaPrevia(acuerdoEmpresa($empresaPago, $tipoPago), $periodo)) {
+        $errorPago = "El período seleccionado ya está cubierto por una cuota previa pagada.";
     } elseif (existePagoEmpresaTipoPeriodo($pagos, $empresaIdPago, $tipoPago, $periodo, $pagoIdActual)) {
         $errorPago = "Ya existe un pago cargado para esta empresa, este tipo y este período.";
     } elseif (!empty($_FILES["comprobante"]["name"])) {
@@ -353,6 +410,7 @@ if (isset($_POST["guardar_pago"])) {
             "tipo" => $_POST["tipo"] ?? "",
             "forma_pago" => $_POST["forma_pago"] ?? "",
             "monto" => floatval($_POST["monto"] ?? 0),
+            "tipo_pago" => $tipoDePago,
             "periodo" => $periodo,
             "comprobante" => $comprobante,
             "observaciones" => trim($_POST["observaciones_pago"] ?? ""),
@@ -453,7 +511,7 @@ $acuerdoForm = [
     "empresa_id" => $_POST["acuerdo_empresa_id"] ?? "",
     "tipo" => $_POST["acuerdo_tipo"] ?? "",
     "monto_total" => $_POST["acuerdo_monto_total"] ?? "",
-    "cantidad_cuotas" => $_POST["acuerdo_cantidad_cuotas"] ?? "2",
+    "cantidad_cuotas" => $_POST["acuerdo_cantidad_cuotas"] ?? "",
     "monto_cuota" => $_POST["acuerdo_monto_cuota"] ?? "",
     "cuotas_pagadas_previas" => $_POST["acuerdo_cuotas_pagadas_previas"] ?? "0",
     "periodo_desde" => $_POST["acuerdo_periodo_desde"] ?? "",
@@ -466,6 +524,7 @@ if (isset($_GET["editar_pago"])) {
     foreach ($pagos as $p) {
         if (($p["id"] ?? "") === $_GET["editar_pago"]) {
             $editarPago = $p;
+            $editarPago["tipo_pago"] = tipoPagoCompatible($p, $empresas);
             break;
         }
     }
@@ -479,6 +538,7 @@ if ($errorPago !== "" && isset($_POST["guardar_pago"])) {
         "tipo" => $_POST["tipo"] ?? "",
         "forma_pago" => $_POST["forma_pago"] ?? "",
         "monto" => $_POST["monto"] ?? "",
+        "tipo_pago" => $_POST["tipo_pago"] ?? "",
         "periodo" => $_POST["periodo"] ?? "",
         "comprobante" => $_POST["comprobante_actual"] ?? "",
         "observaciones" => $_POST["observaciones_pago"] ?? ""
@@ -651,14 +711,20 @@ th{background:#087a46;color:white}
 <input type="hidden" name="empresa_id" value="<?= e($editarEmpresa["id"] ?? "") ?>">
 
 <div class="grid">
-<input type="text" name="razon" placeholder="Razón social" required value="<?= e($editarEmpresa["razon"] ?? "") ?>">
-<input type="text" name="cuit" placeholder="CUIT" required value="<?= e($editarEmpresa["cuit"] ?? "") ?>">
-<input type="number" step="0.01" min="0" name="deuda_os" placeholder="Deuda Obra Social" value="<?= e($editarEmpresa["deuda_os"] ?? "") ?>">
-<input type="number" step="0.01" min="0" name="deuda_sindicato" placeholder="Deuda Sindicato" value="<?= e($editarEmpresa["deuda_sindicato"] ?? "") ?>">
-<input type="number" step="0.01" min="0" name="deuda_mutual" placeholder="Deuda Mutual" value="<?= e($editarEmpresa["deuda_mutual"] ?? "") ?>">
+<div class="campo">
+<label for="empresaRazon">Razón social</label>
+<input type="text" id="empresaRazon" name="razon" placeholder="Razón social" required value="<?= e($editarEmpresa["razon"] ?? "") ?>">
+</div>
+<div class="campo">
+<label for="empresaCuit">CUIT</label>
+<input type="text" id="empresaCuit" name="cuit" placeholder="CUIT" required value="<?= e($editarEmpresa["cuit"] ?? "") ?>">
+</div>
 </div>
 
-<textarea name="observaciones_empresa" placeholder="Observaciones empresa"><?= e($editarEmpresa["observaciones"] ?? "") ?></textarea>
+<div class="campo" style="margin-top:12px">
+<label for="empresaObservaciones">Observaciones</label>
+<textarea id="empresaObservaciones" name="observaciones_empresa" placeholder="Observaciones empresa"><?= e($editarEmpresa["observaciones"] ?? "") ?></textarea>
+</div>
 
 <?php if($errorEmpresa !== ""): ?>
 <p class="error"><?= e($errorEmpresa) ?></p>
@@ -723,6 +789,16 @@ th{background:#087a46;color:white}
 </div>
 
 <div class="campo">
+<label for="pagoTipoPago">Tipo de pago</label>
+<select name="tipo_pago" id="pagoTipoPago" required>
+<option value="">Seleccionar tipo de pago</option>
+<?php foreach(["Pago único","Cuota de acuerdo"] as $op): ?>
+<option value="<?= e($op) ?>" <?= (($editarPago["tipo_pago"] ?? "") === $op) ? "selected" : "" ?>><?= e($op) ?></option>
+<?php endforeach; ?>
+</select>
+</div>
+
+<div class="campo">
 <label for="pagoMonto">Monto pagado</label>
 <input type="number" id="pagoMonto" step="0.01" min="0" name="monto" placeholder="Monto pagado" required value="<?= e($editarPago["monto"] ?? "") ?>">
 </div>
@@ -779,7 +855,6 @@ Comprobante actual:
 <div class="card-body">
 
 <form method="post" id="acuerdoForm">
-<div class="plan-acuerdo" id="acuerdoPlan">Acuerdo de 2 cuotas</div>
 <div class="grid">
 <?php $empresaAcuerdoSeleccionada = buscarEmpresa($empresas, $acuerdoForm["empresa_id"] ?? ""); ?>
 <div class="campo">
@@ -808,7 +883,7 @@ Comprobante actual:
 
 <div class="campo">
 <label for="acuerdoCantidadCuotas">Cantidad total de cuotas</label>
-<input type="number" id="acuerdoCantidadCuotas" min="2" name="acuerdo_cantidad_cuotas" placeholder="Cantidad total de cuotas" required value="<?= e($acuerdoForm["cantidad_cuotas"] ?? "2") ?>">
+<input type="number" id="acuerdoCantidadCuotas" name="acuerdo_cantidad_cuotas" placeholder="Cantidad total de cuotas" required value="<?= e($acuerdoForm["cantidad_cuotas"] ?? "") ?>">
 </div>
 
 <div class="campo">
@@ -844,7 +919,6 @@ Comprobante actual:
 <?php endif; ?>
 
 <br><br>
-<button type="button" id="registrarCuotasPrevias">Registrar cuotas previas pagadas</button>
 <button name="guardar_acuerdo">Guardar acuerdo</button>
 </form>
 </div>
@@ -1165,20 +1239,6 @@ document.querySelectorAll(".periodo-input").forEach((input) => {
     });
 });
 
-const empresaForm = document.getElementById("empresaForm");
-if (empresaForm) {
-    empresaForm.addEventListener("submit", (event) => {
-        ["deuda_os", "deuda_sindicato", "deuda_mutual"].forEach((campo) => {
-            const input = empresaForm.querySelector(`input[name="${campo}"]`);
-            if (input && Number(input.value || 0) < 0) {
-                event.preventDefault();
-                alert("Las deudas no pueden ser negativas.");
-                input.focus();
-            }
-        });
-    });
-}
-
 const acuerdoFormEl = document.getElementById("acuerdoForm");
 if (acuerdoFormEl) {
     const actualizarResumenAcuerdo = () => {
@@ -1187,7 +1247,8 @@ if (acuerdoFormEl) {
         const montoCuotaInput = acuerdoFormEl.querySelector('input[name="acuerdo_monto_cuota"]');
         const periodoDesdeInput = acuerdoFormEl.querySelector('input[name="acuerdo_periodo_desde"]');
         const periodoHastaInput = acuerdoFormEl.querySelector('input[name="acuerdo_periodo_hasta"]');
-        const cantidad = Math.max(Number(cantidadInput?.value || 2), 2);
+        const cantidadIngresada = Number(cantidadInput?.value || 0);
+        const cantidad = Math.max(cantidadIngresada, 0);
         const previas = Math.min(Math.max(Number(previasInput?.value || 0), 0), Math.max(cantidad - 1, 0));
         const pendientes = Math.max(cantidad - previas, 0);
         const montoTotal = Number(acuerdoFormEl.querySelector('input[name="acuerdo_monto_total"]')?.value || 0);
@@ -1197,13 +1258,10 @@ if (acuerdoFormEl) {
 
         if (previasInput) previasInput.max = String(Math.max(cantidad - 1, 0));
 
-        const plan = document.getElementById("acuerdoPlan");
-        if (plan) plan.innerHTML = `Acuerdo de ${cantidad} cuotas<small>Cuotas pendientes: ${pendientes}</small>`;
-
         const resumen = document.getElementById("acuerdoResumen");
         if (resumen) {
             resumen.innerHTML = `<h3>Resumen automático</h3><div class="resumen-acuerdo-grid">
-                <div class="resumen-acuerdo-item"><strong>Plan</strong>Acuerdo de ${cantidad} cuotas</div>
+                <div class="resumen-acuerdo-item"><strong>Plan</strong>${cantidadIngresada ? `Acuerdo de ${cantidad} cuotas` : "Completá la cantidad de cuotas"}</div>
                 <div class="resumen-acuerdo-item"><strong>Monto total</strong>${dineroCliente(montoTotal)}</div>
                 <div class="resumen-acuerdo-item"><strong>Monto cuota</strong>${dineroCliente(montoCuota)}</div>
                 <div class="resumen-acuerdo-item"><strong>Cuotas previas pagadas</strong>${previas}</div>
@@ -1221,7 +1279,7 @@ if (acuerdoFormEl) {
     acuerdoFormEl.addEventListener("submit", (event) => {
         const empresaId = acuerdoFormEl.querySelector('input[name="acuerdo_empresa_id"]')?.value || "";
         const montoTotal = Number(acuerdoFormEl.querySelector('input[name="acuerdo_monto_total"]')?.value || 0);
-        const cantidadCuotas = Number(acuerdoFormEl.querySelector('input[name="acuerdo_cantidad_cuotas"]')?.value || 2);
+        const cantidadCuotas = Number(acuerdoFormEl.querySelector('input[name="acuerdo_cantidad_cuotas"]')?.value || 0);
         const montoCuota = Number(acuerdoFormEl.querySelector('input[name="acuerdo_monto_cuota"]')?.value || 0);
         const cuotasPrevias = Number(acuerdoFormEl.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]')?.value || 0);
         const periodoDesde = acuerdoFormEl.querySelector('input[name="acuerdo_periodo_desde"]');
@@ -1243,7 +1301,7 @@ if (acuerdoFormEl) {
 
         if (cantidadCuotas < 2) {
             event.preventDefault();
-            alert("La cantidad total de cuotas debe ser como mínimo 2. Para un pago único usá Cargar pago.");
+            alert("Para pago único usá la pestaña Cargar pago. Un acuerdo debe tener 2 cuotas o más.");
             acuerdoFormEl.querySelector('input[name="acuerdo_cantidad_cuotas"]')?.focus();
             return;
         }
@@ -1298,20 +1356,6 @@ if (acuerdoFormEl) {
     });
 }
 
-const registrarCuotasPrevias = document.getElementById("registrarCuotasPrevias");
-if (registrarCuotasPrevias && acuerdoFormEl) {
-    registrarCuotasPrevias.addEventListener("click", () => {
-        const cantidad = Number(acuerdoFormEl.querySelector('input[name="acuerdo_cantidad_cuotas"]')?.value || 2);
-        const previas = Number(acuerdoFormEl.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]')?.value || 0);
-        if (previas < 0 || previas >= cantidad) {
-            alert("Las cuotas previas ya pagadas deben ser menores que la cantidad total de cuotas.");
-            acuerdoFormEl.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]')?.focus();
-            return;
-        }
-        alert(`Se registrarán ${previas} cuotas previas pagadas al guardar el acuerdo. No se crearán pagos reales.`);
-    });
-}
-
 const mensajePagoDuplicado = "Ya existe un pago cargado para esta empresa, este tipo y este período.";
 
 function buscarPagoDuplicado(empresaId, tipo, periodo, pagoIdIgnorado = "") {
@@ -1330,6 +1374,7 @@ const pagoForm = document.querySelector('form[enctype="multipart/form-data"]');
 if (pagoForm) {
     const empresaIdInput = pagoForm.querySelector('input[name="empresa_id"]');
     const tipoInput = pagoForm.querySelector('select[name="tipo"]');
+    const tipoPagoInput = pagoForm.querySelector('select[name="tipo_pago"]');
     const periodoInput = pagoForm.querySelector('input[name="periodo"]');
     const pagoIdInput = pagoForm.querySelector('input[name="pago_id"]');
     const montoInput = pagoForm.querySelector('input[name="monto"]');
@@ -1340,11 +1385,20 @@ if (pagoForm) {
     const renderResumenAcuerdoPago = () => {
         const empresaId = empresaIdInput?.value || "";
         const tipo = tipoInput?.value || "";
+        const tipoPago = tipoPagoInput?.value || "";
         const empresa = obtenerEmpresa(empresaId);
 
         if (!resumenAcuerdo) return;
+        if (!tipoPago) {
+            resumenAcuerdo.innerHTML = '<p class="sin">Seleccioná el tipo de pago.</p>';
+            return;
+        }
+        if (tipoPago === "Pago único") {
+            resumenAcuerdo.innerHTML = '<p><strong>Pago único.</strong> No requiere un acuerdo previo.</p>';
+            return;
+        }
         if (!empresaId || !tipo || !empresa) {
-            resumenAcuerdo.innerHTML = '<p class="sin">Seleccioná una empresa y un tipo para consultar si existe un acuerdo.</p>';
+            resumenAcuerdo.innerHTML = '<p class="sin">Seleccioná una empresa y un tipo para consultar el acuerdo.</p>';
             return;
         }
 
@@ -1365,6 +1419,7 @@ if (pagoForm) {
         const pagosAcuerdo = pagosData.filter((pago) =>
             (pago.empresa_id || "") === empresaId &&
             (pago.tipo || "") === tipo &&
+            esCuotaAcuerdoPago(pago, empresa, tipo) &&
             periodos.includes(periodoNormalizado(pago.periodo || ""))
         );
         const pagosSistema = periodos.filter((periodo, indice) =>
@@ -1445,12 +1500,14 @@ if (pagoForm) {
         validarDuplicadoCliente(true);
         renderResumenAcuerdoPago();
     });
+    tipoPagoInput?.addEventListener("change", renderResumenAcuerdoPago);
     periodoInput?.addEventListener("change", () => validarDuplicadoCliente(true));
     periodoInput?.addEventListener("input", () => validarDuplicadoCliente(false));
 
     pagoForm.addEventListener("submit", (event) => {
         const empresaId = empresaIdInput?.value || "";
         const periodo = periodoInput;
+        const tipoPago = tipoPagoInput?.value || "";
         if (!empresaId) {
             event.preventDefault();
             alert("Seleccioná una empresa desde el buscador.");
@@ -1462,6 +1519,27 @@ if (pagoForm) {
             alert("El periodo debe tener formato MM/AA.");
             periodo.focus();
             return;
+        }
+        if (tipoPago === "Cuota de acuerdo") {
+            const empresa = obtenerEmpresa(empresaId);
+            const tipo = tipoInput?.value || "";
+            if (!empresa || !tieneDatosAcuerdo(empresa, tipo)) {
+                event.preventDefault();
+                alert("Para cargar una cuota debe existir un acuerdo para esta empresa y este tipo.");
+                return;
+            }
+            if (cuotaEsperadaEmpresaPeriodo(empresa, periodo?.value || "", tipo) <= 0) {
+                event.preventDefault();
+                alert("El período seleccionado no pertenece al acuerdo.");
+                periodo?.focus();
+                return;
+            }
+            if (cuotaPreviaPagadaEmpresaPeriodo(empresa, periodo?.value || "", tipo)) {
+                event.preventDefault();
+                alert("El período seleccionado ya está cubierto por una cuota previa pagada.");
+                periodo?.focus();
+                return;
+            }
         }
         if (validarDuplicadoCliente(false)) {
             event.preventDefault();
@@ -1606,6 +1684,17 @@ function cuotaPreviaPagadaEmpresaPeriodo(empresa, periodo, tipo = "Obra Social")
     const previas = Math.max(Number(acuerdo.cuotas_pagadas_previas || 0), 0);
     const numero = numeroCuotaEmpresaPeriodo(empresa, periodo, tipo);
     return numero > 0 && numero <= previas;
+}
+
+function esCuotaAcuerdoPago(pago, empresa = null, tipo = "") {
+    if ((pago?.tipo_pago || "") === "Cuota de acuerdo") return true;
+    if ((pago?.tipo_pago || "") === "Pago único") return false;
+    if ((pago?.pago_tipo || "") === "Cuotas") return true;
+    if ((pago?.pago_tipo || "") === "Pago total") return false;
+
+    const empresaPago = empresa || obtenerEmpresa(pago?.empresa_id || "");
+    const tipoPago = tipo || pago?.tipo || "";
+    return !!empresaPago && cuotaEsperadaEmpresaPeriodo(empresaPago, pago?.periodo || "", tipoPago) > 0;
 }
 
 function obtenerEmpresa(id) {
@@ -1830,6 +1919,7 @@ function resumenDetalleAcuerdo(empresa, tipo) {
     const pagosSistema = pagosData.filter((pago) =>
         (pago.empresa_id || "") === (empresa.id || "") &&
         (pago.tipo || "") === tipo &&
+        esCuotaAcuerdoPago(pago, empresa, tipo) &&
         cuotaEsperadaEmpresaPeriodo(empresa, pago.periodo || "", tipo) > 0 &&
         !cuotaPreviaPagadaEmpresaPeriodo(empresa, pago.periodo || "", tipo)
     );
@@ -1936,6 +2026,7 @@ function completarFormularioPago(empresaId, tipo, periodo) {
         const pagoId = form.querySelector('input[name="pago_id"]');
         const comprobanteActual = form.querySelector('input[name="comprobante_actual"]');
         const tipoInput = form.querySelector('select[name="tipo"]');
+        const tipoPagoInput = form.querySelector('select[name="tipo_pago"]');
         const periodoInput = form.querySelector('input[name="periodo"]');
         const monto = form.querySelector('input[name="monto"]');
         const titulo = card ? card.querySelector("h2") : null;
@@ -1947,6 +2038,13 @@ function completarFormularioPago(empresaId, tipo, periodo) {
         if (tipoInput) {
             tipoInput.value = tipo;
             tipoInput.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        if (tipoPagoInput && empresaId && tipo && periodo) {
+            const empresa = obtenerEmpresa(empresaId);
+            tipoPagoInput.value = empresa && cuotaEsperadaEmpresaPeriodo(empresa, periodo, tipo) > 0
+                ? "Cuota de acuerdo"
+                : "Pago único";
+            tipoPagoInput.dispatchEvent(new Event("change", { bubbles: true }));
         }
         if (periodoInput) {
             periodoInput.value = periodo;
@@ -1987,7 +2085,7 @@ function cargarAcuerdoExistente() {
     const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
     if (!tieneDatosAcuerdo(empresa, tipo)) {
         form.querySelector('input[name="acuerdo_monto_total"]').value = "";
-        form.querySelector('input[name="acuerdo_cantidad_cuotas"]').value = "2";
+        form.querySelector('input[name="acuerdo_cantidad_cuotas"]').value = "";
         form.querySelector('input[name="acuerdo_monto_cuota"]').value = "";
         form.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]').value = "0";
         form.querySelector('input[name="acuerdo_periodo_desde"]').value = "";
@@ -2045,7 +2143,7 @@ function configurarInformePeriodo() {
         const pagosAgrupados = new Map();
         pagosPeriodo.forEach((pago) => {
             const empresaPago = obtenerEmpresa(pago.empresa_id || "");
-            const categoria = empresaPago && cuotaEsperadaEmpresaPeriodo(empresaPago, pago.periodo || "", pago.tipo || "") > 0
+            const categoria = empresaPago && esCuotaAcuerdoPago(pago, empresaPago, pago.tipo || "")
                 ? "cuota"
                 : "unico";
             const clave = (pago.empresa_id || "") + "|" + (pago.tipo || "") + "|" + categoria;
