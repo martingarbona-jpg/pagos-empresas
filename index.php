@@ -667,6 +667,48 @@ button{background:#087a46;color:white;border:0;font-weight:bold;cursor:pointer}
 .btn-secundario{display:inline-block;background:#eaf7f0;color:#087a46;border:1px solid #b9dfcc;padding:9px 12px;border-radius:8px;text-decoration:none;font-weight:bold;margin-right:8px}
 .btn-danger{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;background:#b00020;color:white;border:0;padding:0;border-radius:8px;text-decoration:none;font-size:16px;line-height:1;vertical-align:middle}
 .btn-danger:hover{background:#8f001a}
+button,
+.btn-cancelar,
+.btn-secundario,
+.btn-danger,
+.btn-small,
+.tab-btn,
+.tab-jump,
+.toggle-card,
+.acciones a{
+    transition:transform 0.08s ease,box-shadow 0.08s ease,filter 0.08s ease;
+}
+button:hover,
+.btn-cancelar:hover,
+.btn-secundario:hover,
+.btn-danger:hover,
+.btn-small:hover,
+.tab-btn:hover,
+.tab-jump:hover,
+.toggle-card:hover,
+.acciones a:hover{
+    filter:brightness(0.96);
+}
+button:active,
+.btn-cancelar:active,
+.btn-secundario:active,
+.btn-danger:active,
+.btn-small:active,
+.tab-btn:active,
+.tab-jump:active,
+.toggle-card:active,
+.acciones a:active{
+    transform:translateY(2px) scale(0.98);
+    box-shadow:inset 0 2px 5px rgba(0,0,0,0.25);
+}
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible{
+    outline:3px solid rgba(8,122,70,0.25);
+    outline-offset:2px;
+}
 .filters{background:#f7fbf9;border:1px solid #dcefe6;border-radius:12px;padding:14px;margin:12px 0 16px}
 .filters-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto;gap:10px;align-items:center}
 .filters-grid.empresas{grid-template-columns:1.2fr 1.2fr 2fr 1fr auto}
