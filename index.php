@@ -470,6 +470,26 @@ if (isset($_GET["eliminar_pago"])) {
     exit;
 }
 
+if (isset($_GET["eliminar_acuerdo"], $_GET["tipo_acuerdo"])) {
+    $empresaId = $_GET["eliminar_acuerdo"];
+    $tipoAcuerdoEliminar = $_GET["tipo_acuerdo"];
+
+    if (in_array($tipoAcuerdoEliminar, ["Obra Social", "Sindicato", "Mutual"], true)) {
+        foreach ($empresas as $k => $empresa) {
+            if (($empresa["id"] ?? "") !== $empresaId) continue;
+            if (isset($empresas[$k]["acuerdos"]) && is_array($empresas[$k]["acuerdos"])) {
+                unset($empresas[$k]["acuerdos"][$tipoAcuerdoEliminar]);
+            }
+            break;
+        }
+        guardarJson($empresasFile, $empresas);
+    }
+
+    $destino = ($_GET["origen"] ?? "") === "ficha" ? "buscar-empresa" : "cargar-acuerdo";
+    header("Location: index.php#" . $destino);
+    exit;
+}
+
 if (isset($_GET["eliminar_comprobante"])) {
     $id = $_GET["eliminar_comprobante"];
 
@@ -913,6 +933,9 @@ Comprobante actual:
 </div>
 
 <div class="resumen-acuerdo" id="acuerdoResumen" aria-live="polite"></div>
+<div id="accionesAcuerdoExistente" style="display:none;margin-top:12px">
+<a id="eliminarAcuerdoSeleccionado" class="btn-danger" href="#" onclick="return confirm('¿Eliminar este acuerdo? No se eliminarán los pagos ya cargados.')">🗑️ Eliminar acuerdo</a>
+</div>
 
 <?php if($errorEmpresa !== "" && isset($_POST["guardar_acuerdo"])): ?>
 <p class="error"><?= e($errorEmpresa) ?></p>
@@ -1206,7 +1229,7 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 </td>
 <td class="acciones">
 <a href="?editar_pago=<?= e($p["id"]) ?>" title="Editar pago">✏️</a>
-<a href="?eliminar_pago=<?= e($p["id"]) ?>" onclick="return confirm('¿Eliminar este pago?')" title="Eliminar pago">🗑️</a>
+<a class="btn-danger" href="?eliminar_pago=<?= e($p["id"]) ?>" onclick="return confirm('¿Eliminar este pago? Esta acción no elimina la empresa.')" title="Eliminar pago">🗑️ Eliminar pago</a>
 </td>
 </tr>
 <?php endforeach; ?>
@@ -1552,8 +1575,58 @@ if (pagoForm) {
     renderResumenAcuerdoPago();
 }
 
+function normalizarTexto(valor) {
+    return (valor || "")
+        .toString()
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+function distanciaEdicion(a, b) {
+    if (a === b) return 0;
+    if (!a.length) return b.length;
+    if (!b.length) return a.length;
+    const fila = Array.from({ length: b.length + 1 }, (_, indice) => indice);
+    for (let i = 1; i <= a.length; i++) {
+        let diagonal = fila[0];
+        fila[0] = i;
+        for (let j = 1; j <= b.length; j++) {
+            const anterior = fila[j];
+            fila[j] = Math.min(
+                fila[j] + 1,
+                fila[j - 1] + 1,
+                diagonal + (a[i - 1] === b[j - 1] ? 0 : 1)
+            );
+            diagonal = anterior;
+        }
+    }
+    return fila[b.length];
+}
+
+function coincideBusqueda(valor, consulta) {
+    const texto = normalizarTexto(valor);
+    const terminos = normalizarTexto(consulta).split(" ").filter(Boolean);
+    if (!terminos.length) return true;
+    const palabras = texto.split(" ").filter(Boolean);
+    const textoCompacto = texto.replace(/\s/g, "");
+
+    return terminos.every((termino) =>
+        texto.includes(termino) ||
+        textoCompacto.includes(termino.replace(/\s/g, "")) ||
+        palabras.some((palabra) =>
+            palabra.startsWith(termino) ||
+            termino.startsWith(palabra) ||
+            (termino.length >= 5 && Math.abs(palabra.length - termino.length) <= 2 && distanciaEdicion(palabra, termino) <= 2)
+        )
+    );
+}
+
 function textoNormalizado(valor) {
-    return (valor || "").toString().toLowerCase();
+    return normalizarTexto(valor);
 }
 
 function escapeHtml(valor) {
@@ -1770,7 +1843,7 @@ function configurarEmpresaPickers() {
         visible.addEventListener("input", () => {
             hidden.value = "";
             hidden.dispatchEvent(new Event("change", { bubbles: true }));
-            const texto = textoNormalizado(visible.value);
+            const texto = normalizarTexto(visible.value);
             if (texto.length < 2) {
                 resultados.innerHTML = "";
                 resultados.classList.remove("active");
@@ -1778,7 +1851,7 @@ function configurarEmpresaPickers() {
             }
 
             const coincidencias = empresasData
-                .filter((empresa) => textoNormalizado((empresa.razon || "") + " " + (empresa.cuit || "")).includes(texto))
+                .filter((empresa) => coincideBusqueda((empresa.razon || "") + " " + (empresa.cuit || ""), texto))
                 .slice(0, 30);
 
             resultados.innerHTML = coincidencias.length
@@ -1825,13 +1898,13 @@ function configurarFiltrosEmpresas() {
     const aplicar = () => {
         const categoriaValor = categoria.value;
         const planValor = plan.value;
-        const busqueda = textoNormalizado(texto.value);
+        const busqueda = normalizarTexto(texto.value);
         const estadoValor = estado.value;
 
         filas.forEach((fila) => {
             const coincideCategoria = !categoriaValor || fila.dataset[categoriaValor] === "1";
             const coincidePlan = !planValor || fila.dataset.plan === planValor;
-            const coincideTexto = textoNormalizado(fila.dataset.busqueda).includes(busqueda);
+            const coincideTexto = coincideBusqueda(fila.dataset.busqueda, busqueda);
             const coincideEstado = !estadoValor || fila.dataset.estado === estadoValor;
             fila.classList.toggle("fila-oculta", !(coincideCategoria && coincidePlan && coincideTexto && coincideEstado));
         });
@@ -1860,11 +1933,11 @@ function configurarFiltrosPagos() {
     if (!texto || !tipo || !forma || !periodo || !limpiar) return;
 
     const aplicar = () => {
-        const busqueda = textoNormalizado(texto.value);
+        const busqueda = normalizarTexto(texto.value);
         const periodoValor = periodo.value;
 
         filas.forEach((fila) => {
-            const coincideTexto = textoNormalizado(fila.dataset.busqueda).includes(busqueda);
+            const coincideTexto = coincideBusqueda(fila.dataset.busqueda, busqueda);
             const coincideTipo = !tipo.value || fila.dataset.tipo === tipo.value;
             const coincideForma = !forma.value || fila.dataset.forma === forma.value;
             const coincidePeriodo = !periodoValor || (fila.dataset.periodo || "").startsWith(periodoValor);
@@ -1937,6 +2010,7 @@ function resumenDetalleAcuerdo(empresa, tipo) {
 <div>Cuotas registradas en sistema: ${cuotasSistema}</div>
 <div>Cuotas pendientes: ${cuotasPendientes}</div>
 <div>Saldo pendiente estimado: ${dineroCliente(saldoEstimado)}</div>
+<div style="margin-top:10px"><a class="btn-danger" href="?eliminar_acuerdo=${encodeURIComponent(empresa.id || "")}&tipo_acuerdo=${encodeURIComponent(tipo)}&origen=ficha" onclick="return confirm('¿Eliminar este acuerdo? No se eliminarán los pagos ya cargados.')">🗑️ Eliminar acuerdo</a></div>
 </div>`;
 }
 
@@ -1964,7 +2038,7 @@ ${saldos.map((s) => `<div class="box"><div class="label">${escapeHtml(s.tipo)}</
 <p>${tiposInforme.map((tipo) => escapeHtml(renderAcuerdoResumen(empresa, tipo))).join("<br>")}</p>
 <div class="empresa-ficha-grid">${tiposInforme.map((tipo) => resumenDetalleAcuerdo(empresa, tipo)).join("")}</div>
 <h3 class="mini-title">Pagos registrados</h3>
-${pagosEmpresa.length ? `<table><thead><tr><th>Fecha</th><th>Tipo</th><th>Período</th><th>Monto</th><th>Forma</th><th>Acciones</th></tr></thead><tbody>${pagosEmpresa.map((pago) => `<tr><td>${escapeHtml(pago.fecha || "")}</td><td>${escapeHtml(pago.tipo || "")}</td><td>${escapeHtml(periodoNormalizado(pago.periodo || ""))}</td><td>${dineroCliente(pago.monto)}</td><td>${escapeHtml(pago.forma_pago || "")}</td><td><a href="?eliminar_pago=${encodeURIComponent(pago.id || "")}" onclick="return confirm('¿Eliminar este pago?')" title="Eliminar pago">🗑️</a></td></tr>`).join("")}</tbody></table>` : '<p class="sin">Sin pagos registrados.</p>'}
+${pagosEmpresa.length ? `<table><thead><tr><th>Fecha</th><th>Tipo</th><th>Período</th><th>Monto</th><th>Forma</th><th>Acciones</th></tr></thead><tbody>${pagosEmpresa.map((pago) => `<tr><td>${escapeHtml(pago.fecha || "")}</td><td>${escapeHtml(pago.tipo || "")}</td><td>${escapeHtml(periodoNormalizado(pago.periodo || ""))}</td><td>${dineroCliente(pago.monto)}</td><td>${escapeHtml(pago.forma_pago || "")}</td><td><a class="btn-danger" href="?eliminar_pago=${encodeURIComponent(pago.id || "")}" onclick="return confirm('¿Eliminar este pago? Esta acción no elimina la empresa.')" title="Eliminar pago">🗑️ Eliminar pago</a></td></tr>`).join("")}</tbody></table>` : '<p class="sin">Sin pagos registrados.</p>'}
 <br>
 <a class="btn-secundario" href="?editar_empresa=${encodeURIComponent(empresa.id || "")}">Editar empresa</a>
 <a class="btn-danger" href="?eliminar_empresa=${encodeURIComponent(empresa.id || "")}" onclick="return confirm('Esto elimina la empresa y todos sus pagos asociados. ¿Seguro?')">🗑️ Eliminar empresa</a>
@@ -1977,14 +2051,14 @@ ${pagosEmpresa.length ? `<table><thead><tr><th>Fecha</th><th>Tipo</th><th>Perío
 }
 
 function renderResultadosEmpresa(input, contenedor, limite = 12) {
-    const texto = textoNormalizado(input.value);
+    const texto = normalizarTexto(input.value);
     if (!texto) {
         contenedor.innerHTML = "";
         return;
     }
 
     const resultados = empresasData
-        .filter((empresa) => textoNormalizado((empresa.razon || "") + " " + (empresa.cuit || "")).includes(texto))
+        .filter((empresa) => coincideBusqueda((empresa.razon || "") + " " + (empresa.cuit || ""), texto))
         .slice(0, limite);
 
     contenedor.innerHTML = resultados.length
@@ -2077,13 +2151,19 @@ function completarFormularioAcuerdo(empresaId, tipo) {
 function cargarAcuerdoExistente() {
     const form = document.getElementById("acuerdoForm");
     if (!form) return;
+    const acciones = document.getElementById("accionesAcuerdoExistente");
+    const eliminar = document.getElementById("eliminarAcuerdoSeleccionado");
     const empresaId = form.querySelector('input[name="acuerdo_empresa_id"]')?.value || "";
     const tipo = form.querySelector('select[name="acuerdo_tipo"]')?.value || "";
     const empresa = obtenerEmpresa(empresaId);
-    if (!empresa || !tipo) return;
+    if (!empresa || !tipo) {
+        if (acciones) acciones.style.display = "none";
+        return;
+    }
 
     const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
     if (!tieneDatosAcuerdo(empresa, tipo)) {
+        if (acciones) acciones.style.display = "none";
         form.querySelector('input[name="acuerdo_monto_total"]').value = "";
         form.querySelector('input[name="acuerdo_cantidad_cuotas"]').value = "";
         form.querySelector('input[name="acuerdo_monto_cuota"]').value = "";
@@ -2095,6 +2175,10 @@ function cargarAcuerdoExistente() {
         return;
     }
 
+    if (acciones) acciones.style.display = "block";
+    if (eliminar) {
+        eliminar.href = `?eliminar_acuerdo=${encodeURIComponent(empresaId)}&tipo_acuerdo=${encodeURIComponent(tipo)}`;
+    }
     form.querySelector('input[name="acuerdo_monto_total"]').value = acuerdo.monto_total || "";
     form.querySelector('input[name="acuerdo_cantidad_cuotas"]').value = acuerdo.cantidad_cuotas || "2";
     form.querySelector('input[name="acuerdo_monto_cuota"]').value = acuerdo.monto_cuota || "";
@@ -2258,7 +2342,7 @@ function configurarInformePeriodo() {
                     ? fila.comprobantes.map((comp, index) => `<a href="${escapeHtml(comp)}" target="_blank" title="Ver">👁️</a> <a href="${escapeHtml(comp)}" download title="Descargar">⬇️</a>${index < fila.comprobantes.length - 1 ? " " : ""}`).join("")
                     : '<span class="sin">Sin comprobante</span>';
                 const acciones = (fila.ids || []).length
-                    ? fila.ids.map((id) => `<a href="?eliminar_pago=${encodeURIComponent(id)}" onclick="return confirm('¿Eliminar este pago?')" title="Eliminar pago">🗑️</a>`).join(" ")
+                    ? fila.ids.map((id) => `<a class="btn-danger" href="?eliminar_pago=${encodeURIComponent(id)}" onclick="return confirm('¿Eliminar este pago? Esta acción no elimina la empresa.')" title="Eliminar pago">🗑️ Eliminar pago</a>`).join(" ")
                     : '<span class="sin">Sin acciones</span>';
 
                 return `<tr>
