@@ -320,7 +320,7 @@ if (isset($_POST["guardar_pago"])) {
     if (!periodoValido($periodo)) {
         $errorPago = "El periodo debe tener formato MM/AA.";
     } elseif (existePagoEmpresaTipoPeriodo($pagos, $empresaIdPago, $tipoPago, $periodo, $pagoIdActual)) {
-        $errorPago = "Ya existe un pago cargado para esta empresa, este tipo y este período. Revisá los pagos registrados antes de cargarlo nuevamente.";
+        $errorPago = "Ya existe un pago cargado para esta empresa, este tipo y este período.";
     } elseif (!empty($_FILES["comprobante"]["name"])) {
         $ext = strtolower(pathinfo($_FILES["comprobante"]["name"], PATHINFO_EXTENSION));
         $permitidos = ["pdf", "jpg", "jpeg", "png"];
@@ -338,6 +338,14 @@ if (isset($_POST["guardar_pago"])) {
     }
 
     if ($errorPago === "") {
+        $pagoExistente = null;
+        foreach ($pagos as $pagoGuardado) {
+            if (($pagoGuardado["id"] ?? "") === $id) {
+                $pagoExistente = $pagoGuardado;
+                break;
+            }
+        }
+
         $nuevo = [
             "id" => $id,
             "empresa_id" => $_POST["empresa_id"] ?? "",
@@ -345,13 +353,17 @@ if (isset($_POST["guardar_pago"])) {
             "tipo" => $_POST["tipo"] ?? "",
             "forma_pago" => $_POST["forma_pago"] ?? "",
             "monto" => floatval($_POST["monto"] ?? 0),
-            "pago_tipo" => $_POST["pago_tipo"] ?? "Pago total",
-            "cuotas" => $_POST["cuotas"] ?? "",
             "periodo" => $periodo,
             "comprobante" => $comprobante,
             "observaciones" => trim($_POST["observaciones_pago"] ?? ""),
             "fecha_carga" => date("Y-m-d H:i:s")
         ];
+
+        foreach (["pago_tipo", "cuotas"] as $campoHistorico) {
+            if (is_array($pagoExistente) && array_key_exists($campoHistorico, $pagoExistente)) {
+                $nuevo[$campoHistorico] = $pagoExistente[$campoHistorico];
+            }
+        }
 
         $editado = false;
         foreach ($pagos as $k => $p) {
@@ -467,8 +479,6 @@ if ($errorPago !== "" && isset($_POST["guardar_pago"])) {
         "tipo" => $_POST["tipo"] ?? "",
         "forma_pago" => $_POST["forma_pago"] ?? "",
         "monto" => $_POST["monto"] ?? "",
-        "pago_tipo" => $_POST["pago_tipo"] ?? "Pago total",
-        "cuotas" => $_POST["cuotas"] ?? "",
         "periodo" => $_POST["periodo"] ?? "",
         "comprobante" => $_POST["comprobante_actual"] ?? "",
         "observaciones" => $_POST["observaciones_pago"] ?? ""
@@ -678,39 +688,57 @@ th{background:#087a46;color:white}
 
 <div class="grid">
 <?php $empresaPagoSeleccionada = buscarEmpresa($empresas, $editarPago["empresa_id"] ?? ""); ?>
+<div class="campo">
+<label>Empresa</label>
 <div class="empresa-picker" data-hidden-name="empresa_id">
 <input type="text" class="empresa-picker-input" placeholder="Buscar empresa por razón social o CUIT" autocomplete="off" value="<?= e($empresaPagoSeleccionada ? (($empresaPagoSeleccionada["razon"] ?? "") . " - " . ($empresaPagoSeleccionada["cuit"] ?? "")) : "") ?>">
 <input type="hidden" name="empresa_id" class="empresa-picker-hidden" required value="<?= e($editarPago["empresa_id"] ?? "") ?>">
 <div class="empresa-picker-results"></div>
 </div>
+</div>
 
-<input type="date" name="fecha" required value="<?= e($editarPago["fecha"] ?? date("Y-m-d")) ?>">
+<div class="campo">
+<label for="pagoFecha">Fecha de pago</label>
+<input type="date" id="pagoFecha" name="fecha" required value="<?= e($editarPago["fecha"] ?? date("Y-m-d")) ?>">
+</div>
 
-<select name="tipo" required>
+<div class="campo">
+<label for="pagoTipo">Tipo</label>
+<select name="tipo" id="pagoTipo" required>
 <option value="">OS / Sindicato / Mutual</option>
 <?php foreach(["Obra Social","Sindicato","Mutual"] as $op): ?>
 <option value="<?= e($op) ?>" <?= (($editarPago["tipo"] ?? "") === $op) ? "selected" : "" ?>><?= e($op) ?></option>
 <?php endforeach; ?>
 </select>
+</div>
 
-<select name="forma_pago" required>
+<div class="campo">
+<label for="pagoForma">Forma de pago</label>
+<select name="forma_pago" id="pagoForma" required>
 <option value="">Forma de pago</option>
 <?php foreach(["Efectivo","Transferencia","Cheque"] as $op): ?>
 <option value="<?= e($op) ?>" <?= (($editarPago["forma_pago"] ?? "") === $op) ? "selected" : "" ?>><?= e($op) ?></option>
 <?php endforeach; ?>
 </select>
-
-<input type="number" step="0.01" min="0" name="monto" placeholder="Monto pagado" required value="<?= e($editarPago["monto"] ?? "") ?>">
-
-<select name="pago_tipo">
-<option value="Pago total" <?= (($editarPago["pago_tipo"] ?? "") === "Pago total") ? "selected" : "" ?>>Pago total</option>
-<option value="Cuotas" <?= (($editarPago["pago_tipo"] ?? "") === "Cuotas") ? "selected" : "" ?>>Cuotas</option>
-</select>
-
-<input type="number" min="0" name="cuotas" placeholder="Cantidad de cuotas" value="<?= e($editarPago["cuotas"] ?? "") ?>">
-<input type="text" name="periodo" class="periodo-input" placeholder="MM/AA" maxlength="5" inputmode="numeric" pattern="(0[1-9]|1[0-2])\/[0-9]{2}" required value="<?= e(periodoParaInput($editarPago["periodo"] ?? "")) ?>">
-<input type="file" name="comprobante" accept=".pdf,.jpg,.jpeg,.png">
 </div>
+
+<div class="campo">
+<label for="pagoMonto">Monto pagado</label>
+<input type="number" id="pagoMonto" step="0.01" min="0" name="monto" placeholder="Monto pagado" required value="<?= e($editarPago["monto"] ?? "") ?>">
+</div>
+
+<div class="campo">
+<label for="pagoPeriodo">Período</label>
+<input type="text" id="pagoPeriodo" name="periodo" class="periodo-input" placeholder="MM/AA" maxlength="5" inputmode="numeric" pattern="(0[1-9]|1[0-2])\/[0-9]{2}" required value="<?= e(periodoParaInput($editarPago["periodo"] ?? "")) ?>">
+</div>
+
+<div class="campo">
+<label for="pagoComprobante">Comprobante</label>
+<input type="file" id="pagoComprobante" name="comprobante" accept=".pdf,.jpg,.jpeg,.png">
+</div>
+</div>
+
+<div id="resumenAcuerdoPago" class="resumen-acuerdo" aria-live="polite"></div>
 
 <p id="avisoPagoDuplicado" class="error" style="display:none"></p>
 
@@ -727,7 +755,10 @@ Comprobante actual:
 </p>
 <?php endif; ?>
 
-<textarea name="observaciones_pago" placeholder="Observaciones pago"><?= e($editarPago["observaciones"] ?? "") ?></textarea>
+<div class="campo" style="margin-top:12px">
+<label for="pagoObservaciones">Observaciones</label>
+<textarea id="pagoObservaciones" name="observaciones_pago" placeholder="Observaciones pago"><?= e($editarPago["observaciones"] ?? "") ?></textarea>
+</div>
 
 <br><br>
 <button name="guardar_pago"><?= $editarPago ? "Guardar cambios pago" : "Guardar pago" ?></button>
@@ -1070,14 +1101,13 @@ $categoriaMutual = ($deudaMutual > 0 || $pagadoMutual > 0) ? "1" : "0";
 <th>Forma</th>
 <th>Período</th>
 <th>Monto</th>
-<th>Cuotas</th>
 <th>Comprobante</th>
 <th>Acciones</th>
 </tr>
 </thead>
 <tbody>
 <?php if(empty($pagos)): ?>
-<tr><td colspan="10" class="sin">Todavía no hay pagos registrados.</td></tr>
+<tr><td colspan="9" class="sin">Todavía no hay pagos registrados.</td></tr>
 <?php endif; ?>
 
 <?php foreach(array_reverse($pagos) as $p):
@@ -1092,7 +1122,6 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 <td><?= e($p["forma_pago"] ?? "") ?></td>
 <td><?= e($periodoPago) ?></td>
 <td><?= dinero($p["monto"] ?? 0) ?></td>
-<td><?= e(($p["pago_tipo"] ?? "") === "Cuotas" ? ($p["cuotas"] ?? "") : "Total") ?></td>
 <td>
 <?php if(!empty($p["comprobante"])): ?>
 <a href="<?= e($p["comprobante"]) ?>" target="_blank">👁️</a>
@@ -1283,7 +1312,7 @@ if (registrarCuotasPrevias && acuerdoFormEl) {
     });
 }
 
-const mensajePagoDuplicado = "Ya existe un pago cargado para esta empresa, este tipo y este período. Revisá los pagos registrados antes de cargarlo nuevamente.";
+const mensajePagoDuplicado = "Ya existe un pago cargado para esta empresa, este tipo y este período.";
 
 function buscarPagoDuplicado(empresaId, tipo, periodo, pagoIdIgnorado = "") {
     const periodoBuscado = periodoNormalizado(periodo);
@@ -1303,8 +1332,87 @@ if (pagoForm) {
     const tipoInput = pagoForm.querySelector('select[name="tipo"]');
     const periodoInput = pagoForm.querySelector('input[name="periodo"]');
     const pagoIdInput = pagoForm.querySelector('input[name="pago_id"]');
+    const montoInput = pagoForm.querySelector('input[name="monto"]');
     const avisoDuplicado = document.getElementById("avisoPagoDuplicado");
+    const resumenAcuerdo = document.getElementById("resumenAcuerdoPago");
     let claveDuplicadaAvisada = "";
+
+    const renderResumenAcuerdoPago = () => {
+        const empresaId = empresaIdInput?.value || "";
+        const tipo = tipoInput?.value || "";
+        const empresa = obtenerEmpresa(empresaId);
+
+        if (!resumenAcuerdo) return;
+        if (!empresaId || !tipo || !empresa) {
+            resumenAcuerdo.innerHTML = '<p class="sin">Seleccioná una empresa y un tipo para consultar si existe un acuerdo.</p>';
+            return;
+        }
+
+        if (!tieneDatosAcuerdo(empresa, tipo)) {
+            resumenAcuerdo.innerHTML = '<p><strong>No hay acuerdo cargado para esta empresa y este tipo. Podés cargar un pago único normal.</strong></p>';
+            return;
+        }
+
+        const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
+        const cantidad = Math.max(Number(acuerdo.cantidad_cuotas || 2), 2);
+        const previas = Math.min(Math.max(Number(acuerdo.cuotas_pagadas_previas || 0), 0), cantidad - 1);
+        const desde = periodoNormalizado(acuerdo.periodo_desde || "");
+        const hasta = periodoNormalizado(acuerdo.periodo_hasta || "");
+        const indiceDesde = periodoAMesIndice(desde);
+        const periodos = indiceDesde === null
+            ? []
+            : Array.from({ length: cantidad }, (_, indice) => periodoDesdeIndice(indiceDesde + indice));
+        const pagosAcuerdo = pagosData.filter((pago) =>
+            (pago.empresa_id || "") === empresaId &&
+            (pago.tipo || "") === tipo &&
+            periodos.includes(periodoNormalizado(pago.periodo || ""))
+        );
+        const pagosSistema = periodos.filter((periodo, indice) =>
+            indice >= previas && pagosAcuerdo.some((pago) => periodoNormalizado(pago.periodo || "") === periodo)
+        ).length;
+        const pendientes = Math.max(cantidad - previas - pagosSistema, 0);
+
+        const filas = periodos.map((periodo, indice) => {
+            const pago = pagosAcuerdo.find((item) => periodoNormalizado(item.periodo || "") === periodo);
+            if (indice < previas) {
+                return `<tr><td>${escapeHtml(periodo)}</td><td><span class="estado estado-previa">Pagada previa</span></td><td>-</td></tr>`;
+            }
+            if (pago) {
+                return `<tr><td>${escapeHtml(periodo)}</td><td><span class="estado estado-ok">Pagada en sistema</span></td><td><a class="btn-secundario" href="?editar_pago=${encodeURIComponent(pago.id || "")}#cargar-pago">Ver pago</a></td></tr>`;
+            }
+            return `<tr><td>${escapeHtml(periodo)}</td><td><span class="estado estado-deudor">Pendiente</span></td><td><button type="button" class="btn-small seleccionar-periodo-acuerdo" data-periodo="${escapeHtml(periodo)}">Seleccionar período</button></td></tr>`;
+        }).join("");
+
+        resumenAcuerdo.innerHTML = `
+            <h3>Acuerdo ${escapeHtml(tipo)}</h3>
+            <div class="resumen-acuerdo-grid">
+                <div class="resumen-acuerdo-item"><strong>Monto total</strong>${dineroCliente(acuerdo.monto_total)}</div>
+                <div class="resumen-acuerdo-item"><strong>Plan</strong>${cantidad} cuotas de ${dineroCliente(acuerdo.monto_cuota)}</div>
+                <div class="resumen-acuerdo-item"><strong>Período</strong>${escapeHtml(desde)} a ${escapeHtml(hasta)}</div>
+                <div class="resumen-acuerdo-item"><strong>Cuotas previas pagadas</strong>${previas}</div>
+                <div class="resumen-acuerdo-item"><strong>Cuotas pagadas en sistema</strong>${pagosSistema}</div>
+                <div class="resumen-acuerdo-item"><strong>Cuotas pendientes</strong>${pendientes}</div>
+            </div>
+            <h3 class="mini-title">Períodos del acuerdo</h3>
+            <table>
+                <thead><tr><th>Período</th><th>Estado</th><th>Acción</th></tr></thead>
+                <tbody>${filas}</tbody>
+            </table>`;
+
+        resumenAcuerdo.querySelectorAll(".seleccionar-periodo-acuerdo").forEach((boton) => {
+            boton.addEventListener("click", () => {
+                if (periodoInput) {
+                    periodoInput.value = boton.dataset.periodo || "";
+                    periodoInput.dispatchEvent(new Event("input", { bubbles: true }));
+                }
+                if (montoInput && Number(acuerdo.monto_cuota || 0) > 0) {
+                    montoInput.value = acuerdo.monto_cuota;
+                }
+                validarDuplicadoCliente(false);
+                periodoInput?.focus();
+            });
+        });
+    };
 
     const validarDuplicadoCliente = (mostrarAlerta = false) => {
         const empresaId = empresaIdInput?.value || "";
@@ -1329,8 +1437,14 @@ if (pagoForm) {
         return duplicado;
     };
 
-    empresaIdInput?.addEventListener("change", () => validarDuplicadoCliente(true));
-    tipoInput?.addEventListener("change", () => validarDuplicadoCliente(true));
+    empresaIdInput?.addEventListener("change", () => {
+        validarDuplicadoCliente(true);
+        renderResumenAcuerdoPago();
+    });
+    tipoInput?.addEventListener("change", () => {
+        validarDuplicadoCliente(true);
+        renderResumenAcuerdoPago();
+    });
     periodoInput?.addEventListener("change", () => validarDuplicadoCliente(true));
     periodoInput?.addEventListener("input", () => validarDuplicadoCliente(false));
 
@@ -1357,6 +1471,7 @@ if (pagoForm) {
     });
 
     validarDuplicadoCliente(false);
+    renderResumenAcuerdoPago();
 }
 
 function textoNormalizado(valor) {
@@ -1407,6 +1522,12 @@ function periodoAMesIndice(periodo) {
     if (!periodoValidoCliente(normalizado)) return null;
     const [mes, anio] = normalizado.split("/").map(Number);
     return (2000 + anio) * 12 + mes;
+}
+
+function periodoDesdeIndice(indice) {
+    const anioCompleto = Math.floor((indice - 1) / 12);
+    const mes = indice - anioCompleto * 12;
+    return String(mes).padStart(2, "0") + "/" + String(anioCompleto % 100).padStart(2, "0");
 }
 
 function acuerdoEmpresaTipo(empresa, tipo) {
@@ -1709,7 +1830,8 @@ function resumenDetalleAcuerdo(empresa, tipo) {
     const pagosSistema = pagosData.filter((pago) =>
         (pago.empresa_id || "") === (empresa.id || "") &&
         (pago.tipo || "") === tipo &&
-        (pago.pago_tipo || "") === "Cuotas"
+        cuotaEsperadaEmpresaPeriodo(empresa, pago.periodo || "", tipo) > 0 &&
+        !cuotaPreviaPagadaEmpresaPeriodo(empresa, pago.periodo || "", tipo)
     );
     const cuotasSistema = pagosSistema.length;
     const totalSistema = pagosSistema.reduce((total, pago) => total + (Number(pago.monto) || 0), 0);
@@ -1822,8 +1944,14 @@ function completarFormularioPago(empresaId, tipo, periodo) {
         if (pagoId) pagoId.value = "";
         if (comprobanteActual) comprobanteActual.value = "";
         seleccionarEmpresaPicker("empresa_id", empresaId);
-        if (tipoInput) tipoInput.value = tipo;
-        if (periodoInput) periodoInput.value = periodo;
+        if (tipoInput) {
+            tipoInput.value = tipo;
+            tipoInput.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        if (periodoInput) {
+            periodoInput.value = periodo;
+            periodoInput.dispatchEvent(new Event("input", { bubbles: true }));
+        }
         if (titulo) titulo.textContent = "Cargar pago";
         if (guardar) guardar.textContent = "Guardar pago";
         if (monto) monto.focus();
@@ -1916,7 +2044,10 @@ function configurarInformePeriodo() {
 
         const pagosAgrupados = new Map();
         pagosPeriodo.forEach((pago) => {
-            const categoria = (pago.pago_tipo || "Pago total") === "Cuotas" ? "cuota" : "unico";
+            const empresaPago = obtenerEmpresa(pago.empresa_id || "");
+            const categoria = empresaPago && cuotaEsperadaEmpresaPeriodo(empresaPago, pago.periodo || "", pago.tipo || "") > 0
+                ? "cuota"
+                : "unico";
             const clave = (pago.empresa_id || "") + "|" + (pago.tipo || "") + "|" + categoria;
             const actual = pagosAgrupados.get(clave) || {
                 empresaId: pago.empresa_id || "",
