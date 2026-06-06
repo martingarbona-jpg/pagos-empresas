@@ -55,6 +55,12 @@ function periodoValido($periodo) {
     return preg_match('/^(0[1-9]|1[0-2])\/\d{2}$/', $periodo) === 1;
 }
 
+function periodoAIndice($periodo) {
+    if (!periodoValido($periodo)) return null;
+    [$mes, $anio] = array_map('intval', explode('/', $periodo));
+    return (2000 + $anio) * 12 + $mes;
+}
+
 function rutaComprobanteFisico($comprobante, $uploadDir) {
     $comprobante = trim($comprobante ?? "");
     if ($comprobante === "") return null;
@@ -129,15 +135,14 @@ function resumenAcuerdosEmpresa($empresa) {
     $partes = [];
     foreach (["Obra Social","Sindicato","Mutual"] as $tipo) {
         $a = acuerdoEmpresa($empresa, $tipo);
-        if (floatval($a["monto_total"] ?? 0) <= 0 && floatval($a["monto_cuota"] ?? 0) <= 0) continue;
+        $cuotas = intval($a["cantidad_cuotas"] ?? 0);
+        if ($cuotas < 2 || floatval($a["monto_total"] ?? 0) <= 0 || floatval($a["monto_cuota"] ?? 0) <= 0) continue;
 
-        $cuotas = max(intval($a["cantidad_cuotas"] ?? 1), 1);
-        $plan = $cuotas > 1 ? "Acuerdo" : "Pago único";
         $desde = periodoParaInput($a["periodo_desde"] ?? "");
         $hasta = periodoParaInput($a["periodo_hasta"] ?? "");
         $periodo = trim($desde . ($desde && $hasta ? " a " : "") . $hasta);
-        $detalle = $cuotas > 1 ? ($cuotas . " x " . dinero($a["monto_cuota"] ?? 0)) : dinero($a["monto_total"] ?? 0);
-        $partes[] = $tipo . ": " . $plan . " " . $detalle . ($periodo ? " (" . $periodo . ")" : "");
+        $detalle = $cuotas . " x " . dinero($a["monto_cuota"] ?? 0);
+        $partes[] = $tipo . ": Acuerdo " . $detalle . ($periodo ? " (" . $periodo . ")" : "");
     }
     return $partes ? implode(" | ", $partes) : "Sin acuerdo cargado";
 }
@@ -232,40 +237,36 @@ if (isset($_POST["guardar_acuerdo"])) {
     $empresaIdAcuerdo = $_POST["acuerdo_empresa_id"] ?? "";
     $tipoAcuerdo = $_POST["acuerdo_tipo"] ?? "";
     $montoTotalAcuerdo = floatval($_POST["acuerdo_monto_total"] ?? 0);
-    $cantidadCuotasAcuerdo = intval($_POST["acuerdo_cantidad_cuotas"] ?? 1);
+    $cantidadCuotasAcuerdo = intval($_POST["acuerdo_cantidad_cuotas"] ?? 2);
     $montoCuotaAcuerdo = floatval($_POST["acuerdo_monto_cuota"] ?? 0);
     $cuotasPreviasAcuerdo = intval($_POST["acuerdo_cuotas_pagadas_previas"] ?? 0);
     $periodoDesdeAcuerdo = trim($_POST["acuerdo_periodo_desde"] ?? "");
     $periodoHastaAcuerdo = trim($_POST["acuerdo_periodo_hasta"] ?? "");
 
-    if ($cantidadCuotasAcuerdo === 1) {
-        $montoCuotaAcuerdo = 0;
-        $cuotasPreviasAcuerdo = 0;
-        $periodoHastaAcuerdo = "";
-    }
-
     if ($empresaIdAcuerdo === "") {
         $errorEmpresa = "Seleccioná una empresa para cargar el acuerdo.";
     } elseif (!in_array($tipoAcuerdo, ["Obra Social","Sindicato","Mutual"], true)) {
         $errorEmpresa = "Seleccioná un tipo de acuerdo válido.";
-    } elseif ($montoTotalAcuerdo < 0) {
-        $errorEmpresa = "El monto total del acuerdo no puede ser negativo.";
-    } elseif ($cantidadCuotasAcuerdo < 1) {
-        $errorEmpresa = "La cantidad de cuotas debe ser como mínimo 1.";
+    } elseif ($montoTotalAcuerdo <= 0) {
+        $errorEmpresa = "El monto total de la deuda debe ser mayor a 0.";
+    } elseif ($cantidadCuotasAcuerdo < 2) {
+        $errorEmpresa = "La cantidad total de cuotas debe ser como mínimo 2. Para un pago único usá Cargar pago.";
+    } elseif ($montoCuotaAcuerdo <= 0) {
+        $errorEmpresa = "El monto de cada cuota debe ser mayor a 0.";
     } elseif ($cuotasPreviasAcuerdo < 0) {
         $errorEmpresa = "Las cuotas ya pagadas no pueden ser negativas.";
-    } elseif ($cuotasPreviasAcuerdo > $cantidadCuotasAcuerdo) {
-        $errorEmpresa = "Las cuotas ya pagadas no pueden superar la cantidad de cuotas.";
-    } elseif ($cantidadCuotasAcuerdo > 1 && $montoCuotaAcuerdo <= 0) {
-        $errorEmpresa = "Si hay acuerdo, el monto de cada cuota debe ser mayor a 0.";
+    } elseif ($cuotasPreviasAcuerdo >= $cantidadCuotasAcuerdo) {
+        $errorEmpresa = "Las cuotas previas ya pagadas deben ser menores que la cantidad total de cuotas.";
     } elseif ($periodoDesdeAcuerdo === "") {
         $errorEmpresa = "El período es obligatorio.";
-    } elseif ($cantidadCuotasAcuerdo > 1 && $periodoHastaAcuerdo === "") {
-        $errorEmpresa = "Si hay acuerdo, el período desde y el período hasta son obligatorios.";
+    } elseif ($periodoHastaAcuerdo === "") {
+        $errorEmpresa = "El período hasta es obligatorio.";
     } elseif ($periodoDesdeAcuerdo !== "" && !periodoValido($periodoDesdeAcuerdo)) {
         $errorEmpresa = "El período desde debe tener formato MM/AA.";
     } elseif ($periodoHastaAcuerdo !== "" && !periodoValido($periodoHastaAcuerdo)) {
         $errorEmpresa = "El período hasta debe tener formato MM/AA.";
+    } elseif (periodoAIndice($periodoHastaAcuerdo) < periodoAIndice($periodoDesdeAcuerdo)) {
+        $errorEmpresa = "El período hasta no puede ser anterior al período desde.";
     }
 
     if ($errorEmpresa === "") {
@@ -420,7 +421,7 @@ $acuerdoForm = [
     "empresa_id" => $_POST["acuerdo_empresa_id"] ?? "",
     "tipo" => $_POST["acuerdo_tipo"] ?? "",
     "monto_total" => $_POST["acuerdo_monto_total"] ?? "",
-    "cantidad_cuotas" => $_POST["acuerdo_cantidad_cuotas"] ?? "1",
+    "cantidad_cuotas" => $_POST["acuerdo_cantidad_cuotas"] ?? "2",
     "monto_cuota" => $_POST["acuerdo_monto_cuota"] ?? "",
     "cuotas_pagadas_previas" => $_POST["acuerdo_cuotas_pagadas_previas"] ?? "0",
     "periodo_desde" => $_POST["acuerdo_periodo_desde"] ?? "",
@@ -527,7 +528,6 @@ textarea{width:100%;height:65px;margin-top:12px}
 .campo label{font-size:13px;font-weight:bold;color:#34443d}
 .campo input,.campo select,.campo textarea,.campo .empresa-picker{width:100%}
 .campo textarea{margin-top:0}
-.campo-oculto{display:none}
 .plan-acuerdo{margin:0 0 14px;padding:14px 16px;border-radius:12px;background:#eaf7f0;border:1px solid #b9dfcc;color:#087a46;font-size:18px;font-weight:bold}
 .plan-acuerdo small{display:block;margin-top:5px;color:#34443d;font-size:14px}
 .resumen-acuerdo{margin-top:18px;padding:16px;border:1px solid #b9dfcc;border-radius:12px;background:#f7fbf9}
@@ -726,7 +726,7 @@ Comprobante actual:
 <div class="card-body">
 
 <form method="post" id="acuerdoForm">
-<div class="plan-acuerdo" id="acuerdoPlan">Plan: Pago único</div>
+<div class="plan-acuerdo" id="acuerdoPlan">Acuerdo de 2 cuotas</div>
 <div class="grid">
 <?php $empresaAcuerdoSeleccionada = buscarEmpresa($empresas, $acuerdoForm["empresa_id"] ?? ""); ?>
 <div class="campo">
@@ -749,33 +749,33 @@ Comprobante actual:
 </div>
 
 <div class="campo">
-<label for="acuerdoMontoTotal" id="acuerdoMontoTotalLabel">Monto total</label>
-<input type="number" id="acuerdoMontoTotal" step="0.01" min="0" name="acuerdo_monto_total" placeholder="Monto total del acuerdo" value="<?= e($acuerdoForm["monto_total"] ?? "") ?>">
+<label for="acuerdoMontoTotal">Monto total de la deuda</label>
+<input type="number" id="acuerdoMontoTotal" step="0.01" min="0.01" name="acuerdo_monto_total" placeholder="Monto total de la deuda" required value="<?= e($acuerdoForm["monto_total"] ?? "") ?>">
 </div>
 
 <div class="campo">
 <label for="acuerdoCantidadCuotas">Cantidad total de cuotas</label>
-<input type="number" id="acuerdoCantidadCuotas" min="1" name="acuerdo_cantidad_cuotas" placeholder="Cantidad total de cuotas" value="<?= e($acuerdoForm["cantidad_cuotas"] ?? "1") ?>">
+<input type="number" id="acuerdoCantidadCuotas" min="2" name="acuerdo_cantidad_cuotas" placeholder="Cantidad total de cuotas" required value="<?= e($acuerdoForm["cantidad_cuotas"] ?? "2") ?>">
 </div>
 
-<div class="campo campo-acuerdo">
+<div class="campo">
 <label for="acuerdoMontoCuota">Monto de cada cuota</label>
-<input type="number" id="acuerdoMontoCuota" step="0.01" min="0" name="acuerdo_monto_cuota" placeholder="Monto de cada cuota" value="<?= e($acuerdoForm["monto_cuota"] ?? "") ?>">
+<input type="number" id="acuerdoMontoCuota" step="0.01" min="0.01" name="acuerdo_monto_cuota" placeholder="Monto de cada cuota" required value="<?= e($acuerdoForm["monto_cuota"] ?? "") ?>">
 </div>
 
-<div class="campo campo-acuerdo">
+<div class="campo">
 <label for="acuerdoCuotasPrevias">Cuotas previas ya pagadas</label>
 <input type="number" id="acuerdoCuotasPrevias" min="0" name="acuerdo_cuotas_pagadas_previas" placeholder="Cuotas previas ya pagadas" value="<?= e($acuerdoForm["cuotas_pagadas_previas"] ?? "0") ?>">
 </div>
 
 <div class="campo">
-<label for="acuerdoPeriodoDesde" id="acuerdoPeriodoDesdeLabel">Período del pago único</label>
+<label for="acuerdoPeriodoDesde">Período desde</label>
 <input type="text" id="acuerdoPeriodoDesde" name="acuerdo_periodo_desde" class="periodo-input" placeholder="MM/AA" maxlength="5" inputmode="numeric" pattern="(0[1-9]|1[0-2])\/[0-9]{2}" required value="<?= e(periodoParaInput($acuerdoForm["periodo_desde"] ?? "")) ?>">
 </div>
 
-<div class="campo campo-acuerdo">
+<div class="campo">
 <label for="acuerdoPeriodoHasta">Período hasta</label>
-<input type="text" id="acuerdoPeriodoHasta" name="acuerdo_periodo_hasta" class="periodo-input" placeholder="MM/AA" maxlength="5" inputmode="numeric" pattern="(0[1-9]|1[0-2])\/[0-9]{2}" value="<?= e(periodoParaInput($acuerdoForm["periodo_hasta"] ?? "")) ?>">
+<input type="text" id="acuerdoPeriodoHasta" name="acuerdo_periodo_hasta" class="periodo-input" placeholder="MM/AA" maxlength="5" inputmode="numeric" pattern="(0[1-9]|1[0-2])\/[0-9]{2}" required value="<?= e(periodoParaInput($acuerdoForm["periodo_hasta"] ?? "")) ?>">
 </div>
 </div>
 
@@ -791,7 +791,7 @@ Comprobante actual:
 <?php endif; ?>
 
 <br><br>
-<button type="button" id="registrarCuotasPrevias" class="campo-acuerdo">Registrar cuotas previas pagadas</button>
+<button type="button" id="registrarCuotasPrevias">Registrar cuotas previas pagadas</button>
 <button name="guardar_acuerdo">Guardar acuerdo</button>
 </form>
 </div>
@@ -898,8 +898,8 @@ Comprobante actual:
 </select>
 <select id="filtroEmpresaPlan">
 <option value="">Plan: Todos</option>
-<option value="pago-unico">Pago único</option>
 <option value="acuerdo">Acuerdo</option>
+<option value="sin-acuerdo">Sin acuerdo</option>
 </select>
 <input type="text" id="filtroEmpresaTexto" placeholder="Buscar por razón social o CUIT">
 <select id="filtroEmpresaEstado">
@@ -944,7 +944,11 @@ $deudaMutual = floatval($emp["deuda_mutual"] ?? 0);
 $acuerdoTabla = acuerdoDefault();
 foreach (["Obra Social","Sindicato","Mutual"] as $tipoAcuerdoTabla) {
     $tmpAcuerdo = acuerdoEmpresa($emp, $tipoAcuerdoTabla);
-    if (floatval($tmpAcuerdo["monto_total"] ?? 0) > 0 || floatval($tmpAcuerdo["monto_cuota"] ?? 0) > 0) {
+    if (
+        intval($tmpAcuerdo["cantidad_cuotas"] ?? 0) >= 2 &&
+        floatval($tmpAcuerdo["monto_total"] ?? 0) > 0 &&
+        floatval($tmpAcuerdo["monto_cuota"] ?? 0) > 0
+    ) {
         $acuerdoTabla = $tmpAcuerdo;
         break;
     }
@@ -955,12 +959,12 @@ $montoCuotaEmpresa = floatval($acuerdoTabla["monto_cuota"] ?? 0);
 $periodoDesdeEmpresa = periodoParaInput($acuerdoTabla["periodo_desde"] ?? "");
 $periodoHastaEmpresa = periodoParaInput($acuerdoTabla["periodo_hasta"] ?? "");
 $esAcuerdoEmpresa = $cantidadCuotasEmpresa > 1;
-$planEmpresa = $esAcuerdoEmpresa ? "Acuerdo" : "Pago único";
-$planFiltroEmpresa = $esAcuerdoEmpresa ? "acuerdo" : "pago-unico";
-$cuotasEmpresa = $esAcuerdoEmpresa ? ($cantidadCuotasEmpresa . " x " . dinero($montoCuotaEmpresa)) : "1";
+$planEmpresa = $esAcuerdoEmpresa ? "Acuerdo" : "Sin acuerdo";
+$planFiltroEmpresa = $esAcuerdoEmpresa ? "acuerdo" : "sin-acuerdo";
+$cuotasEmpresa = $esAcuerdoEmpresa ? ($cantidadCuotasEmpresa . " x " . dinero($montoCuotaEmpresa)) : "-";
 $periodoAcuerdoEmpresa = $esAcuerdoEmpresa
     ? trim($periodoDesdeEmpresa . (($periodoDesdeEmpresa !== "" || $periodoHastaEmpresa !== "") ? " a " : "") . $periodoHastaEmpresa)
-    : ($periodoDesdeEmpresa ?: $periodoHastaEmpresa);
+    : "";
 
 $pagadoOS = totalPagado($pagos, $emp["id"], "Obra Social");
 $pagadoSind = totalPagado($pagos, $emp["id"], "Sindicato");
@@ -1132,50 +1136,29 @@ if (acuerdoFormEl) {
         const montoCuotaInput = acuerdoFormEl.querySelector('input[name="acuerdo_monto_cuota"]');
         const periodoDesdeInput = acuerdoFormEl.querySelector('input[name="acuerdo_periodo_desde"]');
         const periodoHastaInput = acuerdoFormEl.querySelector('input[name="acuerdo_periodo_hasta"]');
-        const cantidad = Math.max(Number(cantidadInput?.value || 1), 1);
-        const esAcuerdo = cantidad > 1;
-        const previas = Math.min(Math.max(Number(previasInput?.value || 0), 0), cantidad);
+        const cantidad = Math.max(Number(cantidadInput?.value || 2), 2);
+        const previas = Math.min(Math.max(Number(previasInput?.value || 0), 0), Math.max(cantidad - 1, 0));
         const pendientes = Math.max(cantidad - previas, 0);
         const montoTotal = Number(acuerdoFormEl.querySelector('input[name="acuerdo_monto_total"]')?.value || 0);
         const montoCuota = Number(montoCuotaInput?.value || 0);
         const desde = periodoDesdeInput?.value || "--";
         const hasta = periodoHastaInput?.value || "--";
 
-        acuerdoFormEl.querySelectorAll(".campo-acuerdo").forEach((elemento) => {
-            elemento.classList.toggle("campo-oculto", !esAcuerdo);
-        });
-
-        if (previasInput) previasInput.max = String(cantidad);
-        if (periodoHastaInput) periodoHastaInput.required = esAcuerdo;
-        const periodoLabel = document.getElementById("acuerdoPeriodoDesdeLabel");
-        if (periodoLabel) periodoLabel.textContent = esAcuerdo ? "Período desde" : "Período del pago único";
-        const montoTotalLabel = document.getElementById("acuerdoMontoTotalLabel");
-        if (montoTotalLabel) montoTotalLabel.textContent = esAcuerdo ? "Monto total del acuerdo" : "Monto total";
+        if (previasInput) previasInput.max = String(Math.max(cantidad - 1, 0));
 
         const plan = document.getElementById("acuerdoPlan");
-        if (plan) {
-            plan.innerHTML = esAcuerdo
-                ? `Plan: Acuerdo de ${cantidad} cuotas<small>Cuotas pendientes: ${pendientes}</small>`
-                : "Plan: Pago único";
-        }
+        if (plan) plan.innerHTML = `Acuerdo de ${cantidad} cuotas<small>Cuotas pendientes: ${pendientes}</small>`;
 
         const resumen = document.getElementById("acuerdoResumen");
         if (resumen) {
-            resumen.innerHTML = esAcuerdo
-                ? `<h3>Resumen automático</h3><div class="resumen-acuerdo-grid">
-                    <div class="resumen-acuerdo-item"><strong>Plan</strong>Acuerdo</div>
-                    <div class="resumen-acuerdo-item"><strong>Total acuerdo</strong>${dineroCliente(montoTotal)}</div>
-                    <div class="resumen-acuerdo-item"><strong>Cantidad de cuotas</strong>${cantidad}</div>
-                    <div class="resumen-acuerdo-item"><strong>Monto cuota</strong>${dineroCliente(montoCuota)}</div>
-                    <div class="resumen-acuerdo-item"><strong>Cuotas previas pagadas</strong>${previas}</div>
-                    <div class="resumen-acuerdo-item"><strong>Cuotas pendientes</strong>${pendientes}</div>
-                    <div class="resumen-acuerdo-item"><strong>Período</strong>${escapeHtml(desde)} a ${escapeHtml(hasta)}</div>
-                </div>`
-                : `<h3>Resumen automático</h3><div class="resumen-acuerdo-grid">
-                    <div class="resumen-acuerdo-item"><strong>Plan</strong>Pago único</div>
-                    <div class="resumen-acuerdo-item"><strong>Monto</strong>${dineroCliente(montoTotal)}</div>
-                    <div class="resumen-acuerdo-item"><strong>Período</strong>${escapeHtml(desde)}</div>
-                </div>`;
+            resumen.innerHTML = `<h3>Resumen automático</h3><div class="resumen-acuerdo-grid">
+                <div class="resumen-acuerdo-item"><strong>Plan</strong>Acuerdo de ${cantidad} cuotas</div>
+                <div class="resumen-acuerdo-item"><strong>Monto total</strong>${dineroCliente(montoTotal)}</div>
+                <div class="resumen-acuerdo-item"><strong>Monto cuota</strong>${dineroCliente(montoCuota)}</div>
+                <div class="resumen-acuerdo-item"><strong>Cuotas previas pagadas</strong>${previas}</div>
+                <div class="resumen-acuerdo-item"><strong>Cuotas pendientes</strong>${pendientes}</div>
+                <div class="resumen-acuerdo-item"><strong>Período</strong>${escapeHtml(desde)} a ${escapeHtml(hasta)}</div>
+            </div>`;
         }
     };
 
@@ -1187,11 +1170,9 @@ if (acuerdoFormEl) {
     acuerdoFormEl.addEventListener("submit", (event) => {
         const empresaId = acuerdoFormEl.querySelector('input[name="acuerdo_empresa_id"]')?.value || "";
         const montoTotal = Number(acuerdoFormEl.querySelector('input[name="acuerdo_monto_total"]')?.value || 0);
-        const cantidadCuotas = Number(acuerdoFormEl.querySelector('input[name="acuerdo_cantidad_cuotas"]')?.value || 1);
+        const cantidadCuotas = Number(acuerdoFormEl.querySelector('input[name="acuerdo_cantidad_cuotas"]')?.value || 2);
         const montoCuota = Number(acuerdoFormEl.querySelector('input[name="acuerdo_monto_cuota"]')?.value || 0);
-        const cuotasPrevias = cantidadCuotas > 1
-            ? Number(acuerdoFormEl.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]')?.value || 0)
-            : 0;
+        const cuotasPrevias = Number(acuerdoFormEl.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]')?.value || 0);
         const periodoDesde = acuerdoFormEl.querySelector('input[name="acuerdo_periodo_desde"]');
         const periodoHasta = acuerdoFormEl.querySelector('input[name="acuerdo_periodo_hasta"]');
 
@@ -1202,30 +1183,30 @@ if (acuerdoFormEl) {
             return;
         }
 
-        if (montoTotal < 0) {
+        if (montoTotal <= 0) {
             event.preventDefault();
-            alert("El monto total del acuerdo no puede ser negativo.");
+            alert("El monto total de la deuda debe ser mayor a 0.");
             acuerdoFormEl.querySelector('input[name="acuerdo_monto_total"]')?.focus();
             return;
         }
 
-        if (cantidadCuotas < 1) {
+        if (cantidadCuotas < 2) {
             event.preventDefault();
-            alert("La cantidad de cuotas debe ser como mínimo 1.");
+            alert("La cantidad total de cuotas debe ser como mínimo 2. Para un pago único usá Cargar pago.");
             acuerdoFormEl.querySelector('input[name="acuerdo_cantidad_cuotas"]')?.focus();
             return;
         }
 
-        if (cuotasPrevias < 0 || cuotasPrevias > cantidadCuotas) {
+        if (cuotasPrevias < 0 || cuotasPrevias >= cantidadCuotas) {
             event.preventDefault();
-            alert("Las cuotas ya pagadas deben estar entre 0 y la cantidad total de cuotas.");
+            alert("Las cuotas previas ya pagadas deben ser mayores o iguales a 0 y menores que la cantidad total de cuotas.");
             acuerdoFormEl.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]')?.focus();
             return;
         }
 
-        if (cantidadCuotas > 1 && montoCuota <= 0) {
+        if (montoCuota <= 0) {
             event.preventDefault();
-            alert("Si hay acuerdo, el monto de cada cuota debe ser mayor a 0.");
+            alert("El monto de cada cuota debe ser mayor a 0.");
             acuerdoFormEl.querySelector('input[name="acuerdo_monto_cuota"]')?.focus();
             return;
         }
@@ -1237,9 +1218,9 @@ if (acuerdoFormEl) {
             return;
         }
 
-        if (cantidadCuotas > 1 && !periodoHasta?.value) {
+        if (!periodoHasta?.value) {
             event.preventDefault();
-            alert("Si hay acuerdo, el período desde y el período hasta son obligatorios.");
+            alert("El período hasta es obligatorio.");
             periodoHasta?.focus();
             return;
         }
@@ -1255,6 +1236,13 @@ if (acuerdoFormEl) {
             event.preventDefault();
             alert("El período hasta debe tener formato MM/AA.");
             periodoHasta.focus();
+            return;
+        }
+
+        if (periodoAMesIndice(periodoHasta?.value) < periodoAMesIndice(periodoDesde?.value)) {
+            event.preventDefault();
+            alert("El período hasta no puede ser anterior al período desde.");
+            periodoHasta?.focus();
         }
     });
 }
@@ -1262,10 +1250,10 @@ if (acuerdoFormEl) {
 const registrarCuotasPrevias = document.getElementById("registrarCuotasPrevias");
 if (registrarCuotasPrevias && acuerdoFormEl) {
     registrarCuotasPrevias.addEventListener("click", () => {
-        const cantidad = Number(acuerdoFormEl.querySelector('input[name="acuerdo_cantidad_cuotas"]')?.value || 1);
+        const cantidad = Number(acuerdoFormEl.querySelector('input[name="acuerdo_cantidad_cuotas"]')?.value || 2);
         const previas = Number(acuerdoFormEl.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]')?.value || 0);
-        if (previas < 0 || previas > cantidad) {
-            alert("Las cuotas ya pagadas deben estar entre 0 y la cantidad total de cuotas.");
+        if (previas < 0 || previas >= cantidad) {
+            alert("Las cuotas previas ya pagadas deben ser menores que la cantidad total de cuotas.");
             acuerdoFormEl.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]')?.focus();
             return;
         }
@@ -1368,9 +1356,7 @@ function acuerdoEmpresaTipo(empresa, tipo) {
 }
 
 function planEmpresa(empresa, tipo = "Obra Social") {
-    const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
-    const cantidad = Math.max(Number(acuerdo.cantidad_cuotas || 1), 1);
-    return cantidad > 1 ? "Acuerdo" : "Pago único";
+    return tieneDatosAcuerdo(empresa, tipo) ? "Acuerdo" : "Sin acuerdo";
 }
 
 function periodoAcuerdoEmpresa(empresa, tipo = "Obra Social") {
@@ -1383,29 +1369,20 @@ function periodoAcuerdoEmpresa(empresa, tipo = "Obra Social") {
 
 function tieneDatosAcuerdo(empresa, tipo = "Obra Social") {
     const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
-    return Number(acuerdo.monto_total || 0) > 0 ||
-        Number(acuerdo.monto_cuota || 0) > 0 ||
-        Number(acuerdo.cuotas_pagadas_previas || 0) > 0 ||
-        Number(acuerdo.cantidad_cuotas || 0) > 0 ||
-        !!periodoNormalizado(acuerdo.periodo_desde || "") ||
+    return Number(acuerdo.cantidad_cuotas || 0) >= 2 &&
+        Number(acuerdo.monto_total || 0) > 0 &&
+        Number(acuerdo.monto_cuota || 0) > 0 &&
+        !!periodoNormalizado(acuerdo.periodo_desde || "") &&
         !!periodoNormalizado(acuerdo.periodo_hasta || "");
 }
 
 function cuotaEsperadaEmpresaPeriodo(empresa, periodo, tipo = "Obra Social") {
     const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
-    const cantidad = Math.max(Number(acuerdo.cantidad_cuotas || 1), 1);
+    const cantidad = Number(acuerdo.cantidad_cuotas || 0);
     const consultado = periodoAMesIndice(periodo);
     const desde = periodoAMesIndice(acuerdo.periodo_desde || "");
     const hasta = periodoAMesIndice(acuerdo.periodo_hasta || "");
-    if (consultado === null) return 0;
-
-    if (cantidad <= 1) {
-        const periodoUnico = desde ?? hasta;
-        if (periodoUnico !== null && consultado === periodoUnico) {
-            return Math.max(Number(acuerdo.monto_total || acuerdo.monto_cuota || 0), 0);
-        }
-        return 0;
-    }
+    if (cantidad < 2 || consultado === null) return 0;
 
     if (desde !== null && hasta !== null && consultado >= desde && consultado <= hasta) {
         return Math.max(Number(acuerdo.monto_cuota || 0), 0);
@@ -1416,10 +1393,10 @@ function cuotaEsperadaEmpresaPeriodo(empresa, periodo, tipo = "Obra Social") {
 
 function numeroCuotaEmpresaPeriodo(empresa, periodo, tipo = "Obra Social") {
     const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
-    const cantidad = Math.max(Number(acuerdo.cantidad_cuotas || 1), 1);
+    const cantidad = Number(acuerdo.cantidad_cuotas || 0);
     const consultado = periodoAMesIndice(periodo);
     const desde = periodoAMesIndice(acuerdo.periodo_desde || "");
-    if (consultado === null || desde === null) return 0;
+    if (cantidad < 2 || consultado === null || desde === null) return 0;
     const numero = consultado - desde + 1;
     return numero >= 1 && numero <= cantidad ? numero : 0;
 }
@@ -1615,21 +1592,6 @@ function configurarFiltrosPagos() {
     });
 }
 
-function empresaObligadaPorTipo(empresa, tipo) {
-    const deudaCampo = {
-        "Obra Social": "deuda_os",
-        "Sindicato": "deuda_sindicato",
-        "Mutual": "deuda_mutual"
-    }[tipo];
-
-    const tieneDeuda = Number(empresa[deudaCampo] || 0) > 0;
-    const tienePagoHistorico = pagosData.some((pago) =>
-        (pago.empresa_id || "") === (empresa.id || "") && (pago.tipo || "") === tipo
-    );
-
-    return tieneDeuda || tienePagoHistorico || tieneDatosAcuerdo(empresa, tipo);
-}
-
 function totalPagadoCliente(empresaId, tipo) {
     return pagosData.reduce((total, pago) => {
         if ((pago.empresa_id || "") === empresaId && (pago.tipo || "") === tipo) {
@@ -1645,12 +1607,11 @@ function renderAcuerdoResumen(empresa, tipo) {
         return `${tipo}: Sin acuerdo cargado`;
     }
 
-    const cuotas = Math.max(Number(acuerdo.cantidad_cuotas || 1), 1);
-    const previas = Math.min(Math.max(Number(acuerdo.cuotas_pagadas_previas || 0), 0), cuotas);
-    const plan = cuotas > 1 ? "Acuerdo" : "Pago único";
-    const detalle = cuotas > 1 ? `${cuotas} x ${dineroCliente(acuerdo.monto_cuota)}` : dineroCliente(acuerdo.monto_total || acuerdo.monto_cuota);
+    const cuotas = Math.max(Number(acuerdo.cantidad_cuotas || 2), 2);
+    const previas = Math.min(Math.max(Number(acuerdo.cuotas_pagadas_previas || 0), 0), cuotas - 1);
+    const detalle = `${cuotas} x ${dineroCliente(acuerdo.monto_cuota)}`;
     const periodo = periodoAcuerdoEmpresa(empresa, tipo);
-    return `${tipo}: ${plan} ${detalle}${previas ? " - previas pagadas: " + previas : ""}${periodo ? " (" + periodo + ")" : ""}`;
+    return `${tipo}: Acuerdo ${detalle}${previas ? " - previas pagadas: " + previas : ""}${periodo ? " (" + periodo + ")" : ""}`;
 }
 
 function resumenDetalleAcuerdo(empresa, tipo) {
@@ -1659,10 +1620,14 @@ function resumenDetalleAcuerdo(empresa, tipo) {
         return `<div class="box"><div class="label">${escapeHtml(tipo)}</div><div class="sin">Sin acuerdo cargado</div></div>`;
     }
 
-    const cantidad = Math.max(Number(acuerdo.cantidad_cuotas || 1), 1);
-    const previas = Math.min(Math.max(Number(acuerdo.cuotas_pagadas_previas || 0), 0), cantidad);
-    const montoCuota = cantidad > 1 ? Number(acuerdo.monto_cuota || 0) : Number(acuerdo.monto_total || acuerdo.monto_cuota || 0);
-    const pagosSistema = pagosData.filter((pago) => (pago.empresa_id || "") === (empresa.id || "") && (pago.tipo || "") === tipo);
+    const cantidad = Math.max(Number(acuerdo.cantidad_cuotas || 2), 2);
+    const previas = Math.min(Math.max(Number(acuerdo.cuotas_pagadas_previas || 0), 0), cantidad - 1);
+    const montoCuota = Number(acuerdo.monto_cuota || 0);
+    const pagosSistema = pagosData.filter((pago) =>
+        (pago.empresa_id || "") === (empresa.id || "") &&
+        (pago.tipo || "") === tipo &&
+        (pago.pago_tipo || "") === "Cuotas"
+    );
     const cuotasSistema = pagosSistema.length;
     const totalSistema = pagosSistema.reduce((total, pago) => total + (Number(pago.monto) || 0), 0);
     const cuotasPendientes = Math.max(cantidad - previas - cuotasSistema, 0);
@@ -1804,8 +1769,20 @@ function cargarAcuerdoExistente() {
     if (!empresa || !tipo) return;
 
     const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
+    if (!tieneDatosAcuerdo(empresa, tipo)) {
+        form.querySelector('input[name="acuerdo_monto_total"]').value = "";
+        form.querySelector('input[name="acuerdo_cantidad_cuotas"]').value = "2";
+        form.querySelector('input[name="acuerdo_monto_cuota"]').value = "";
+        form.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]').value = "0";
+        form.querySelector('input[name="acuerdo_periodo_desde"]').value = "";
+        form.querySelector('input[name="acuerdo_periodo_hasta"]').value = "";
+        form.querySelector('textarea[name="acuerdo_observaciones"]').value = "";
+        if (typeof form.actualizarResumen === "function") form.actualizarResumen();
+        return;
+    }
+
     form.querySelector('input[name="acuerdo_monto_total"]').value = acuerdo.monto_total || "";
-    form.querySelector('input[name="acuerdo_cantidad_cuotas"]').value = acuerdo.cantidad_cuotas || "1";
+    form.querySelector('input[name="acuerdo_cantidad_cuotas"]').value = acuerdo.cantidad_cuotas || "2";
     form.querySelector('input[name="acuerdo_monto_cuota"]').value = acuerdo.monto_cuota || "";
     form.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]').value = acuerdo.cuotas_pagadas_previas || "0";
     form.querySelector('input[name="acuerdo_periodo_desde"]').value = periodoNormalizado(acuerdo.periodo_desde || "");
@@ -1851,10 +1828,12 @@ function configurarInformePeriodo() {
 
         const pagosAgrupados = new Map();
         pagosPeriodo.forEach((pago) => {
-            const clave = (pago.empresa_id || "") + "|" + (pago.tipo || "");
+            const categoria = (pago.pago_tipo || "Pago total") === "Cuotas" ? "cuota" : "unico";
+            const clave = (pago.empresa_id || "") + "|" + (pago.tipo || "") + "|" + categoria;
             const actual = pagosAgrupados.get(clave) || {
                 empresaId: pago.empresa_id || "",
                 tipo: pago.tipo || "",
+                categoria,
                 monto: 0,
                 fechas: [],
                 comprobantes: [],
@@ -1874,14 +1853,11 @@ function configurarInformePeriodo() {
 
         empresasData.forEach((empresa) => {
             tiposSeleccionados.forEach((tipo) => {
-                if (!empresaObligadaPorTipo(empresa, tipo)) return;
-
-                const clave = (empresa.id || "") + "|" + tipo;
+                const clave = (empresa.id || "") + "|" + tipo + "|cuota";
                 const esperadoPorAcuerdo = cuotaEsperadaEmpresaPeriodo(empresa, periodo, tipo);
-                const usaAcuerdo = tieneDatosAcuerdo(empresa, tipo);
                 const pagadaPrevia = cuotaPreviaPagadaEmpresaPeriodo(empresa, periodo, tipo);
                 const pago = pagosAgrupados.get(clave);
-                const aplicaEnPeriodo = esperadoPorAcuerdo > 0 || !usaAcuerdo || pago;
+                const aplicaEnPeriodo = esperadoPorAcuerdo > 0 || pago;
 
                 if (!aplicaEnPeriodo) return;
 
@@ -1899,6 +1875,7 @@ function configurarInformePeriodo() {
                         fechas: ["Cuota previa"],
                         comprobantes: [],
                         ids: [],
+                        categoria: "cuota",
                         estado: "PAGADA PREVIA"
                     });
                 } else if (pago) {
@@ -1911,6 +1888,7 @@ function configurarInformePeriodo() {
                         fechas: pago.fechas,
                         comprobantes: pago.comprobantes,
                         ids: pago.ids,
+                        categoria: "cuota",
                         estado: esperado <= 0 ? "EXTRA" : (pago.monto >= esperado ? "AL DÍA" : "PARCIAL")
                     });
                 } else {
@@ -1920,25 +1898,30 @@ function configurarInformePeriodo() {
         });
 
         pagosAgrupados.forEach((pago, clave) => {
-            if (filasPagaron.some((fila) => (fila.empresa.id || "") + "|" + fila.tipo === clave)) return;
+            if (filasPagaron.some((fila) => (fila.empresa?.id || "") + "|" + fila.tipo + "|" + (fila.categoria || "cuota") === clave)) return;
             const empresa = obtenerEmpresa(pago.empresaId);
+            const esCuota = pago.categoria === "cuota";
             filasPagaron.push({
                 empresa,
                 tipo: pago.tipo,
-                plan: empresa ? planEmpresa(empresa, pago.tipo) : "",
-                esperado: empresa ? cuotaEsperadaEmpresaPeriodo(empresa, periodo, pago.tipo) : 0,
+                plan: esCuota && empresa ? planEmpresa(empresa, pago.tipo) : "Pago único",
+                esperado: esCuota && empresa ? cuotaEsperadaEmpresaPeriodo(empresa, periodo, pago.tipo) : 0,
                 pagado: pago.monto,
                 fechas: pago.fechas,
                 comprobantes: pago.comprobantes,
                 ids: pago.ids,
-                estado: empresa && cuotaEsperadaEmpresaPeriodo(empresa, periodo, pago.tipo) > 0 ? "AL DÍA" : "EXTRA"
+                categoria: pago.categoria,
+                estado: esCuota && empresa && cuotaEsperadaEmpresaPeriodo(empresa, periodo, pago.tipo) > 0 ? "AL DÍA" : "EXTRA"
             });
         });
 
         const totalPagado = filasPagaron
             .filter((fila) => fila.estado !== "PAGADA PREVIA")
             .reduce((total, fila) => total + fila.pagado, 0);
-        const pendiente = Math.max(totalEsperado - totalPagado - totalCubiertoPrevio, 0);
+        const totalPagadoCuotas = filasPagaron
+            .filter((fila) => fila.estado !== "PAGADA PREVIA" && fila.categoria === "cuota")
+            .reduce((total, fila) => total + fila.pagado, 0);
+        const pendiente = Math.max(totalEsperado - totalPagadoCuotas - totalCubiertoPrevio, 0);
         const empresasQuePagaron = new Set(filasPagaron.map((fila) => fila.empresa?.id || "").filter(Boolean));
         const empresasQueNoPagaron = new Set(deudores.map((fila) => fila.empresa.id || "").filter(Boolean));
 
