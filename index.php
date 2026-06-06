@@ -648,7 +648,8 @@ textarea{width:100%;height:65px;margin-top:12px}
 button{background:#087a46;color:white;border:0;font-weight:bold;cursor:pointer}
 .btn-cancelar{display:inline-block;background:#777;color:white;padding:10px 14px;border-radius:8px;text-decoration:none;margin-left:8px}
 .btn-secundario{display:inline-block;background:#eaf7f0;color:#087a46;border:1px solid #b9dfcc;padding:9px 12px;border-radius:8px;text-decoration:none;font-weight:bold;margin-right:8px}
-.btn-danger{display:inline-block;background:#b00020;color:white;border:0;padding:9px 12px;border-radius:8px;text-decoration:none;font-weight:bold}
+.btn-danger{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;background:#b00020;color:white;border:0;padding:0;border-radius:8px;text-decoration:none;font-size:16px;line-height:1;vertical-align:middle}
+.btn-danger:hover{background:#8f001a}
 .filters{background:#f7fbf9;border:1px solid #dcefe6;border-radius:12px;padding:14px;margin:12px 0 16px}
 .filters-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto;gap:10px;align-items:center}
 .filters-grid.empresas{grid-template-columns:1.2fr 1.2fr 2fr 1fr auto}
@@ -847,7 +848,7 @@ th{background:#087a46;color:white}
 Comprobante actual:
 <a class="btn-secundario" href="<?= e($editarPago["comprobante"]) ?>" target="_blank">👁️ Ver</a>
 <a class="btn-secundario" href="<?= e($editarPago["comprobante"]) ?>" download>⬇️ Descargar</a>
-<a class="btn-danger" href="?eliminar_comprobante=<?= e($editarPago["id"] ?? "") ?>" onclick="return confirm('¿Eliminar solo el comprobante de este pago?')">❌ Comprobante</a>
+<a class="btn-danger" href="?eliminar_comprobante=<?= e($editarPago["id"] ?? "") ?>" onclick="return confirm('¿Eliminar solo el comprobante de este pago?')" title="Eliminar comprobante" aria-label="Eliminar comprobante">🗑️</a>
 </p>
 <?php endif; ?>
 
@@ -934,7 +935,7 @@ Comprobante actual:
 
 <div class="resumen-acuerdo" id="acuerdoResumen" aria-live="polite"></div>
 <div id="accionesAcuerdoExistente" style="display:none;margin-top:12px">
-<a id="eliminarAcuerdoSeleccionado" class="btn-danger" href="#" onclick="return confirm('¿Eliminar este acuerdo? No se eliminarán los pagos ya cargados.')">🗑️ Eliminar acuerdo</a>
+<a id="eliminarAcuerdoSeleccionado" class="btn-danger" href="#" onclick="return confirm('¿Eliminar este acuerdo? No se eliminarán los pagos ya cargados.')" title="Eliminar acuerdo" aria-label="Eliminar acuerdo">🗑️</a>
 </div>
 
 <?php if($errorEmpresa !== "" && isset($_POST["guardar_acuerdo"])): ?>
@@ -1150,7 +1151,7 @@ $categoriaMutual = ($deudaMutual > 0 || $pagadoMutual > 0) ? "1" : "0";
 <td class="<?= $saldoMutual <= 0 ? 'saldo-ok' : 'saldo-debe' ?>"><?= dinero($saldoMutual) ?></td>
 <td class="acciones">
 <a href="?editar_empresa=<?= e($emp["id"]) ?>" title="Editar empresa">✏️</a>
-<a href="?eliminar_empresa=<?= e($emp["id"]) ?>" onclick="return confirm('Esto elimina la empresa y todos sus pagos. ¿Seguro?')" title="Eliminar empresa">🗑️</a>
+<a class="btn-danger" href="?eliminar_empresa=<?= e($emp["id"]) ?>" onclick="return confirm('Esto elimina la empresa y todos sus pagos. ¿Seguro?')" title="Eliminar empresa" aria-label="Eliminar empresa">🗑️</a>
 </td>
 </tr>
 <?php endforeach; ?>
@@ -1229,7 +1230,7 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 </td>
 <td class="acciones">
 <a href="?editar_pago=<?= e($p["id"]) ?>" title="Editar pago">✏️</a>
-<a class="btn-danger" href="?eliminar_pago=<?= e($p["id"]) ?>" onclick="return confirm('¿Eliminar este pago? Esta acción no elimina la empresa.')" title="Eliminar pago">🗑️ Eliminar pago</a>
+<a class="btn-danger" href="?eliminar_pago=<?= e($p["id"]) ?>" onclick="return confirm('¿Eliminar este pago? Esta acción no elimina la empresa.')" title="Eliminar pago" aria-label="Eliminar pago">🗑️</a>
 </td>
 </tr>
 <?php endforeach; ?>
@@ -2010,7 +2011,7 @@ function resumenDetalleAcuerdo(empresa, tipo) {
 <div>Cuotas registradas en sistema: ${cuotasSistema}</div>
 <div>Cuotas pendientes: ${cuotasPendientes}</div>
 <div>Saldo pendiente estimado: ${dineroCliente(saldoEstimado)}</div>
-<div style="margin-top:10px"><a class="btn-danger" href="?eliminar_acuerdo=${encodeURIComponent(empresa.id || "")}&tipo_acuerdo=${encodeURIComponent(tipo)}&origen=ficha" onclick="return confirm('¿Eliminar este acuerdo? No se eliminarán los pagos ya cargados.')">🗑️ Eliminar acuerdo</a></div>
+<div style="margin-top:10px"><a class="btn-danger" href="?eliminar_acuerdo=${encodeURIComponent(empresa.id || "")}&tipo_acuerdo=${encodeURIComponent(tipo)}&origen=ficha" onclick="return confirm('¿Eliminar este acuerdo? No se eliminarán los pagos ya cargados.')" title="Eliminar acuerdo" aria-label="Eliminar acuerdo">🗑️</a></div>
 </div>`;
 }
 
@@ -2038,10 +2039,10 @@ ${saldos.map((s) => `<div class="box"><div class="label">${escapeHtml(s.tipo)}</
 <p>${tiposInforme.map((tipo) => escapeHtml(renderAcuerdoResumen(empresa, tipo))).join("<br>")}</p>
 <div class="empresa-ficha-grid">${tiposInforme.map((tipo) => resumenDetalleAcuerdo(empresa, tipo)).join("")}</div>
 <h3 class="mini-title">Pagos registrados</h3>
-${pagosEmpresa.length ? `<table><thead><tr><th>Fecha</th><th>Tipo</th><th>Período</th><th>Monto</th><th>Forma</th><th>Acciones</th></tr></thead><tbody>${pagosEmpresa.map((pago) => `<tr><td>${escapeHtml(pago.fecha || "")}</td><td>${escapeHtml(pago.tipo || "")}</td><td>${escapeHtml(periodoNormalizado(pago.periodo || ""))}</td><td>${dineroCliente(pago.monto)}</td><td>${escapeHtml(pago.forma_pago || "")}</td><td><a class="btn-danger" href="?eliminar_pago=${encodeURIComponent(pago.id || "")}" onclick="return confirm('¿Eliminar este pago? Esta acción no elimina la empresa.')" title="Eliminar pago">🗑️ Eliminar pago</a></td></tr>`).join("")}</tbody></table>` : '<p class="sin">Sin pagos registrados.</p>'}
+${pagosEmpresa.length ? `<table><thead><tr><th>Fecha</th><th>Tipo</th><th>Período</th><th>Monto</th><th>Forma</th><th>Acciones</th></tr></thead><tbody>${pagosEmpresa.map((pago) => `<tr><td>${escapeHtml(pago.fecha || "")}</td><td>${escapeHtml(pago.tipo || "")}</td><td>${escapeHtml(periodoNormalizado(pago.periodo || ""))}</td><td>${dineroCliente(pago.monto)}</td><td>${escapeHtml(pago.forma_pago || "")}</td><td><a class="btn-danger" href="?eliminar_pago=${encodeURIComponent(pago.id || "")}" onclick="return confirm('¿Eliminar este pago? Esta acción no elimina la empresa.')" title="Eliminar pago" aria-label="Eliminar pago">🗑️</a></td></tr>`).join("")}</tbody></table>` : '<p class="sin">Sin pagos registrados.</p>'}
 <br>
 <a class="btn-secundario" href="?editar_empresa=${encodeURIComponent(empresa.id || "")}">Editar empresa</a>
-<a class="btn-danger" href="?eliminar_empresa=${encodeURIComponent(empresa.id || "")}" onclick="return confirm('Esto elimina la empresa y todos sus pagos asociados. ¿Seguro?')">🗑️ Eliminar empresa</a>
+<a class="btn-danger" href="?eliminar_empresa=${encodeURIComponent(empresa.id || "")}" onclick="return confirm('Esto elimina la empresa y todos sus pagos asociados. ¿Seguro?')" title="Eliminar empresa" aria-label="Eliminar empresa">🗑️</a>
 <button type="button" class="btn-small ficha-cargar-pago" data-empresa="${escapeHtml(empresa.id || "")}">Cargar pago</button>
 <button type="button" class="btn-small ficha-cargar-acuerdo" data-empresa="${escapeHtml(empresa.id || "")}">Cargar acuerdo</button>
 `;
@@ -2342,7 +2343,7 @@ function configurarInformePeriodo() {
                     ? fila.comprobantes.map((comp, index) => `<a href="${escapeHtml(comp)}" target="_blank" title="Ver">👁️</a> <a href="${escapeHtml(comp)}" download title="Descargar">⬇️</a>${index < fila.comprobantes.length - 1 ? " " : ""}`).join("")
                     : '<span class="sin">Sin comprobante</span>';
                 const acciones = (fila.ids || []).length
-                    ? fila.ids.map((id) => `<a class="btn-danger" href="?eliminar_pago=${encodeURIComponent(id)}" onclick="return confirm('¿Eliminar este pago? Esta acción no elimina la empresa.')" title="Eliminar pago">🗑️ Eliminar pago</a>`).join(" ")
+                    ? fila.ids.map((id) => `<a class="btn-danger" href="?eliminar_pago=${encodeURIComponent(id)}" onclick="return confirm('¿Eliminar este pago? Esta acción no elimina la empresa.')" title="Eliminar pago" aria-label="Eliminar pago">🗑️</a>`).join(" ")
                     : '<span class="sin">Sin acciones</span>';
 
                 return `<tr>
