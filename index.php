@@ -106,6 +106,23 @@ function totalPagado($pagos, $empresaId, $tipo) {
     return $total;
 }
 
+function resumenFinancieroEmpresaTipo($empresa, $tipo, $pagos) {
+    $tieneAcuerdo = acuerdoValidoEmpresaTipo($empresa, $tipo);
+    $acuerdo = acuerdoEmpresa($empresa, $tipo);
+    $pagosRegistrados = totalPagado($pagos, $empresa["id"] ?? "", $tipo);
+    $montoCuota = $tieneAcuerdo ? max(floatval($acuerdo["monto_cuota"] ?? 0), 0) : 0;
+    $cuotasPrevias = $tieneAcuerdo ? max(intval($acuerdo["cuotas_pagadas_previas"] ?? 0), 0) : 0;
+    $deuda = $tieneAcuerdo ? max(floatval($acuerdo["monto_total"] ?? 0), 0) : 0;
+    $cobrado = $pagosRegistrados + ($cuotasPrevias * $montoCuota);
+
+    return [
+        "tiene_acuerdo" => $tieneAcuerdo,
+        "deuda" => $deuda,
+        "cobrado" => $cobrado,
+        "saldo" => max($deuda - $cobrado, 0)
+    ];
+}
+
 function eliminarComprobantePago($pago, $uploadDir) {
     $rutaFisica = rutaComprobanteFisico($pago["comprobante"] ?? "", $uploadDir);
     if ($rutaFisica && is_file($rutaFisica)) {
@@ -1096,9 +1113,12 @@ Comprobante actual:
 <?php endif; ?>
 
 <?php foreach($empresas as $emp):
-$deudaOS = floatval($emp["deuda_os"] ?? 0);
-$deudaSind = floatval($emp["deuda_sindicato"] ?? 0);
-$deudaMutual = floatval($emp["deuda_mutual"] ?? 0);
+$resumenOS = resumenFinancieroEmpresaTipo($emp, "Obra Social", $pagos);
+$resumenSind = resumenFinancieroEmpresaTipo($emp, "Sindicato", $pagos);
+$resumenMutual = resumenFinancieroEmpresaTipo($emp, "Mutual", $pagos);
+$deudaOS = $resumenOS["deuda"];
+$deudaSind = $resumenSind["deuda"];
+$deudaMutual = $resumenMutual["deuda"];
 $acuerdoTabla = acuerdoDefault();
 foreach (["Obra Social","Sindicato","Mutual"] as $tipoAcuerdoTabla) {
     $tmpAcuerdo = acuerdoEmpresa($emp, $tipoAcuerdoTabla);
@@ -1124,15 +1144,15 @@ $periodoAcuerdoEmpresa = $esAcuerdoEmpresa
     ? trim($periodoDesdeEmpresa . (($periodoDesdeEmpresa !== "" || $periodoHastaEmpresa !== "") ? " a " : "") . $periodoHastaEmpresa)
     : "";
 
-$pagadoOS = totalPagado($pagos, $emp["id"], "Obra Social");
-$pagadoSind = totalPagado($pagos, $emp["id"], "Sindicato");
-$pagadoMutual = totalPagado($pagos, $emp["id"], "Mutual");
+$pagadoOS = $resumenOS["cobrado"];
+$pagadoSind = $resumenSind["cobrado"];
+$pagadoMutual = $resumenMutual["cobrado"];
 
-$saldoOS = max($deudaOS - $pagadoOS, 0);
-$saldoSind = max($deudaSind - $pagadoSind, 0);
-$saldoMutual = max($deudaMutual - $pagadoMutual, 0);
+$saldoOS = $resumenOS["saldo"];
+$saldoSind = $resumenSind["saldo"];
+$saldoMutual = $resumenMutual["saldo"];
 
-$tieneDeudaCargada = ($deudaOS > 0 || $deudaSind > 0 || $deudaMutual > 0);
+$tieneDeudaCargada = ($resumenOS["tiene_acuerdo"] || $resumenSind["tiene_acuerdo"] || $resumenMutual["tiene_acuerdo"]);
 $tieneSaldoReal = ($saldoOS > 0 || $saldoSind > 0 || $saldoMutual > 0);
 $estadoEmpresa = $tieneSaldoReal ? "deuda" : ($tieneDeudaCargada ? "cancelada" : "");
 
@@ -1975,6 +1995,23 @@ function totalPagadoCliente(empresaId, tipo) {
     }, 0);
 }
 
+function resumenFinancieroCliente(empresa, tipo) {
+    const tieneAcuerdo = tieneDatosAcuerdo(empresa, tipo);
+    const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
+    const pagosRegistrados = totalPagadoCliente(empresa.id || "", tipo);
+    const montoCuota = tieneAcuerdo ? Math.max(Number(acuerdo.monto_cuota || 0), 0) : 0;
+    const previas = tieneAcuerdo ? Math.max(Number(acuerdo.cuotas_pagadas_previas || 0), 0) : 0;
+    const deuda = tieneAcuerdo ? Math.max(Number(acuerdo.monto_total || 0), 0) : 0;
+    const cobrado = pagosRegistrados + previas * montoCuota;
+
+    return {
+        tieneAcuerdo,
+        deuda,
+        cobrado,
+        saldo: Math.max(deuda - cobrado, 0)
+    };
+}
+
 function renderAcuerdoResumen(empresa, tipo) {
     const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
     if (!tieneDatosAcuerdo(empresa, tipo) || (Number(acuerdo.monto_total || 0) <= 0 && Number(acuerdo.monto_cuota || 0) <= 0)) {
@@ -2005,9 +2042,8 @@ function resumenDetalleAcuerdo(empresa, tipo) {
         !cuotaPreviaPagadaEmpresaPeriodo(empresa, pago.periodo || "", tipo)
     );
     const cuotasSistema = pagosSistema.length;
-    const totalSistema = pagosSistema.reduce((total, pago) => total + (Number(pago.monto) || 0), 0);
     const cuotasPendientes = Math.max(cantidad - previas - cuotasSistema, 0);
-    const saldoEstimado = Math.max((cantidad - previas) * montoCuota - totalSistema, 0);
+    const saldoEstimado = resumenFinancieroCliente(empresa, tipo).saldo;
 
     return `<div class="box">
 <div class="label">${escapeHtml(tipo)}</div>
@@ -2028,11 +2064,7 @@ function seleccionarEmpresaFicha(empresaId) {
     if (!empresa || !ficha) return;
 
     const saldos = tiposInforme.map((tipo) => {
-        const deudaCampo = {"Obra Social":"deuda_os","Sindicato":"deuda_sindicato","Mutual":"deuda_mutual"}[tipo];
-        const deuda = Number(empresa[deudaCampo] || 0);
-        const cobrado = totalPagadoCliente(empresa.id || "", tipo);
-        const saldo = Math.max(deuda - cobrado, 0);
-        return { tipo, deuda, cobrado, saldo };
+        return { tipo, ...resumenFinancieroCliente(empresa, tipo) };
     });
 
     const pagosEmpresa = pagosData.filter((pago) => (pago.empresa_id || "") === (empresa.id || ""));
