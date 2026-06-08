@@ -2,6 +2,7 @@
 session_start();
 
 $USUARIOS = [
+    "ADMIN" => "Uma334484",
     "AGUERO" => "Beto2026",
     "MONTELEONE" => "Claudio2026",
     "ESCUDERO" => "Vero2026"
@@ -37,7 +38,23 @@ function guardarJson($file, $data) {
 }
 
 function usuarioActual() {
-    return $_SESSION["usuario_logueado"] ?? "";
+    return $_SESSION["usuario"] ?? $_SESSION["usuario_logueado"] ?? "";
+}
+
+function usuarioEsAdmin() {
+    return usuarioActual() === "ADMIN";
+}
+
+function accesoDenegado() {
+    http_response_code(403);
+    echo "Acceso denegado";
+    exit;
+}
+
+function requerirAdmin() {
+    if (!usuarioEsAdmin()) {
+        accesoDenegado();
+    }
 }
 
 function empresaActiva($empresa) {
@@ -447,6 +464,7 @@ if (isset($_POST["login"])) {
     $passwordLogin = $_POST["password"] ?? "";
     if (isset($USUARIOS[$usuarioLogin]) && hash_equals($USUARIOS[$usuarioLogin], $passwordLogin)) {
         $_SESSION["auth_pagos_empresas"] = true;
+        $_SESSION["usuario"] = $usuarioLogin;
         $_SESSION["usuario_logueado"] = $usuarioLogin;
         header("Location: index.php");
         exit;
@@ -460,7 +478,7 @@ if (isset($_GET["logout"])) {
     exit;
 }
 
-if (!isset($_SESSION["auth_pagos_empresas"]) || !isset($_SESSION["usuario_logueado"])) {
+if (!isset($_SESSION["auth_pagos_empresas"]) || usuarioActual() === "") {
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -490,8 +508,11 @@ button{background:#087a46;color:white;border:0;font-weight:bold;cursor:pointer}
 </html>
 <?php exit; }
 
+$esAdmin = usuarioEsAdmin();
+
 $backupError = "";
 if (isset($_GET["backup"])) {
+    requerirAdmin();
     registrarAuditoria($auditoriaFile, "descargar_backup", "Descargó backup manual del sistema");
     if (!enviarBackupManual($empresasFile, $pagosFile, $auditoriaFile, $papeleraPagosFile, $uploadDir)) {
         $backupError = "No fue posible generar el backup.";
@@ -506,6 +527,24 @@ $errorEmpresa = "";
 $coincidenciasEmpresa = ["cuit" => null, "exacta" => null, "parecidas" => []];
 $advertenciaEmpresa = false;
 $errorPago = "";
+
+if (isset($_GET["auditoria"]) && !$esAdmin) {
+    accesoDenegado();
+}
+
+if (isset($_GET["exportar"]) && $_GET["exportar"] === "auditoria") {
+    requerirAdmin();
+    $filas = [];
+    foreach (array_reverse($auditoria) as $movimiento) {
+        $filas[] = [
+            $movimiento["fecha"] ?? "",
+            $movimiento["usuario"] ?? "",
+            $movimiento["accion"] ?? "",
+            $movimiento["detalle"] ?? ""
+        ];
+    }
+    enviarCsv("auditoria_" . date("Y-m-d_H-i") . ".csv", ["Fecha", "Usuario", "Accion", "Detalle"], $filas);
+}
 
 if (isset($_GET["exportar"]) && $_GET["exportar"] === "pagos") {
     $filas = [];
@@ -1132,7 +1171,9 @@ th{background:#087a46;color:white}
 <h1>Registro de Pagos - Empresas Deudoras</h1>
 <div class="header-actions">
 <span class="usuario-header">Usuario: <?= e(usuarioActual()) ?></span>
+<?php if ($esAdmin): ?>
 <a href="?backup=1">&#x2B07; Backup</a>
+<?php endif; ?>
 <a href="?logout=1">Salir</a>
 </div>
 </header>
@@ -1145,7 +1186,9 @@ th{background:#087a46;color:white}
 <button type="button" class="tab-btn" data-tab="nueva-empresa">Nueva empresa</button>
 <button type="button" class="tab-btn" data-tab="informe-periodo">Informe período</button>
 <button type="button" class="tab-btn" data-tab="pagos">Pagos registrados</button>
+<?php if ($esAdmin): ?>
 <button type="button" class="tab-btn" data-tab="auditoria">Auditoría</button>
+<?php endif; ?>
 </nav>
 
 <main>
@@ -1733,6 +1776,7 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 </div>
 </section>
 
+<?php if ($esAdmin): ?>
 <section class="tab-panel" id="tab-auditoria">
 <div class="card collapsible-card" id="auditoria" data-card="auditoria">
 <div class="card-header">
@@ -1744,6 +1788,7 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 <div class="filters-grid auditoria">
 <select id="filtroAuditoriaUsuario">
 <option value="">Todos</option>
+<option value="ADMIN">ADMIN</option>
 <option value="AGUERO">AGUERO</option>
 <option value="MONTELEONE">MONTELEONE</option>
 <option value="ESCUDERO">ESCUDERO</option>
@@ -1766,7 +1811,7 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 <input type="date" id="filtroAuditoriaDesde">
 <input type="date" id="filtroAuditoriaHasta">
 <button type="button" id="limpiarFiltrosAuditoria">Limpiar filtros</button>
-<button type="button" id="exportarAuditoriaCsv">Exportar auditoría CSV</button>
+<a class="btn-secundario" id="exportarAuditoriaCsv" href="?exportar=auditoria">Exportar auditoría CSV</a>
 </div>
 </div>
 <table>
@@ -1797,6 +1842,7 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 </div>
 </div>
 </section>
+<?php endif; ?>
 
 </main>
 <script>
@@ -2743,7 +2789,10 @@ function configurarFiltrosAuditoria() {
         hasta.value = "";
         aplicar();
     });
-    exportar.addEventListener("click", exportarCsv);
+    exportar.addEventListener("click", (event) => {
+        event.preventDefault();
+        exportarCsv();
+    });
     aplicar();
 }
 
