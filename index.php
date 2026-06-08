@@ -1,18 +1,26 @@
 <?php
 session_start();
 
-$PASSWORD = "1234"; // CAMBIAR CONTRASEÑA ACÁ
+$USUARIOS = [
+    "AGUERO" => "Beto2026",
+    "MONTELEONE" => "Claudio2026",
+    "ESCUDERO" => "Vero2026"
+];
 
 $dataDir = __DIR__ . "/data";
 $uploadDir = __DIR__ . "/comprobantes";
 
 $empresasFile = $dataDir . "/empresas.json";
 $pagosFile = $dataDir . "/pagos.json";
+$auditoriaFile = $dataDir . "/auditoria.json";
+$papeleraPagosFile = $dataDir . "/papelera_pagos.json";
 
 if (!is_dir($dataDir)) mkdir($dataDir, 0755, true);
 if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
 if (!file_exists($empresasFile)) file_put_contents($empresasFile, "[]");
 if (!file_exists($pagosFile)) file_put_contents($pagosFile, "[]");
+if (!file_exists($auditoriaFile)) file_put_contents($auditoriaFile, "[]");
+if (!file_exists($papeleraPagosFile)) file_put_contents($papeleraPagosFile, "[]");
 
 function e($v) {
     return htmlspecialchars($v ?? "", ENT_QUOTES, "UTF-8");
@@ -26,6 +34,59 @@ function leerJson($file) {
 
 function guardarJson($file, $data) {
     file_put_contents($file, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+function usuarioActual() {
+    return $_SESSION["usuario_logueado"] ?? "";
+}
+
+function empresaActiva($empresa) {
+    return !array_key_exists("activa", $empresa) || $empresa["activa"] !== false;
+}
+
+function registrarAuditoria($auditoriaFile, $accion, $detalle) {
+    $auditoria = leerJson($auditoriaFile);
+    $auditoria[] = [
+        "fecha" => date("Y-m-d H:i:s"),
+        "usuario" => usuarioActual() ?: "SISTEMA",
+        "accion" => $accion,
+        "detalle" => $detalle
+    ];
+    guardarJson($auditoriaFile, $auditoria);
+}
+
+function detalleEmpresa($empresa) {
+    $razon = trim($empresa["razon"] ?? "Empresa");
+    $cuit = trim($empresa["cuit"] ?? "");
+    return $razon . ($cuit !== "" ? " - CUIT " . $cuit : "");
+}
+
+function detallePago($pago, $empresas) {
+    $empresa = buscarEmpresa($empresas, $pago["empresa_id"] ?? "");
+    return ($empresa["razon"] ?? "Empresa eliminada")
+        . " - " . ($pago["tipo"] ?? "")
+        . " - " . periodoParaInput($pago["periodo"] ?? "")
+        . " - " . dinero($pago["monto"] ?? 0);
+}
+
+function enviarCsv($nombreArchivo, $columnas, $filas) {
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+
+    header("Content-Type: text/csv; charset=UTF-8");
+    header("Content-Disposition: attachment; filename=\"" . $nombreArchivo . "\"");
+    header("Cache-Control: no-store, no-cache, must-revalidate");
+    header("Pragma: no-cache");
+
+    $salida = fopen("php://output", "w");
+    fwrite($salida, "\xEF\xBB\xBF");
+    fputcsv($salida, $columnas, ";");
+    foreach ($filas as $fila) {
+        fputcsv($salida, $fila, ";");
+    }
+    fclose($salida);
+    exit;
 }
 
 function dinero($n) {
@@ -235,7 +296,7 @@ function agregarDirectorioZip($zip, $directorio, $nombreEnZip) {
     return true;
 }
 
-function enviarBackupManual($empresasFile, $pagosFile, $uploadDir) {
+function enviarBackupManual($empresasFile, $pagosFile, $auditoriaFile, $papeleraPagosFile, $uploadDir) {
     if (!class_exists("ZipArchive")) return false;
 
     $nombreDescarga = "backup_" . date("Y-m-d_H-i") . ".zip";
@@ -251,6 +312,8 @@ function enviarBackupManual($empresasFile, $pagosFile, $uploadDir) {
     $ok = true;
     $ok = $ok && is_file($empresasFile) && $zip->addFile($empresasFile, "empresas.json");
     $ok = $ok && is_file($pagosFile) && $zip->addFile($pagosFile, "pagos.json");
+    $ok = $ok && is_file($auditoriaFile) && $zip->addFile($auditoriaFile, "auditoria.json");
+    $ok = $ok && is_file($papeleraPagosFile) && $zip->addFile($papeleraPagosFile, "papelera_pagos.json");
     $ok = $ok && agregarDirectorioZip($zip, $uploadDir, "comprobantes");
 
     if (!$zip->close() || !$ok) {
@@ -380,12 +443,15 @@ function resumenAcuerdosEmpresa($empresa) {
 }
 
 if (isset($_POST["login"])) {
-    if (($_POST["password"] ?? "") === $PASSWORD) {
+    $usuarioLogin = strtoupper(trim($_POST["usuario"] ?? ""));
+    $passwordLogin = $_POST["password"] ?? "";
+    if (isset($USUARIOS[$usuarioLogin]) && hash_equals($USUARIOS[$usuarioLogin], $passwordLogin)) {
         $_SESSION["auth_pagos_empresas"] = true;
+        $_SESSION["usuario_logueado"] = $usuarioLogin;
         header("Location: index.php");
         exit;
     }
-    $error = "Contraseña incorrecta";
+    $error = "Usuario o contraseña incorrectos";
 }
 
 if (isset($_GET["logout"])) {
@@ -394,7 +460,7 @@ if (isset($_GET["logout"])) {
     exit;
 }
 
-if (!isset($_SESSION["auth_pagos_empresas"])) {
+if (!isset($_SESSION["auth_pagos_empresas"]) || !isset($_SESSION["usuario_logueado"])) {
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -414,7 +480,8 @@ button{background:#087a46;color:white;border:0;font-weight:bold;cursor:pointer}
 <div class="login">
 <h1>Pagos Empresas</h1>
 <form method="post">
-<input type="password" name="password" placeholder="Contraseña" required>
+<input type="text" name="usuario" placeholder="Usuario" autocomplete="username" required>
+<input type="password" name="password" placeholder="Contraseña" autocomplete="current-password" required>
 <button name="login">Ingresar</button>
 </form>
 <?php if(isset($error)) echo "<p class='error'>".e($error)."</p>"; ?>
@@ -425,17 +492,90 @@ button{background:#087a46;color:white;border:0;font-weight:bold;cursor:pointer}
 
 $backupError = "";
 if (isset($_GET["backup"])) {
-    if (!enviarBackupManual($empresasFile, $pagosFile, $uploadDir)) {
+    registrarAuditoria($auditoriaFile, "descargar_backup", "Descargó backup manual del sistema");
+    if (!enviarBackupManual($empresasFile, $pagosFile, $auditoriaFile, $papeleraPagosFile, $uploadDir)) {
         $backupError = "No fue posible generar el backup.";
     }
 }
 
 $empresas = leerJson($empresasFile);
 $pagos = leerJson($pagosFile);
+$auditoria = leerJson($auditoriaFile);
+$papeleraPagos = leerJson($papeleraPagosFile);
 $errorEmpresa = "";
 $coincidenciasEmpresa = ["cuit" => null, "exacta" => null, "parecidas" => []];
 $advertenciaEmpresa = false;
 $errorPago = "";
+
+if (isset($_GET["exportar"]) && $_GET["exportar"] === "pagos") {
+    $filas = [];
+    foreach (array_reverse($pagos) as $pago) {
+        $empresa = buscarEmpresa($empresas, $pago["empresa_id"] ?? "");
+        $filas[] = [
+            $empresa["razon"] ?? "Empresa eliminada",
+            $empresa["cuit"] ?? "",
+            $pago["tipo"] ?? "",
+            periodoParaInput($pago["periodo"] ?? ""),
+            $pago["fecha"] ?? "",
+            $pago["forma_pago"] ?? "",
+            floatval($pago["monto"] ?? 0),
+            $pago["observaciones"] ?? ""
+        ];
+    }
+    enviarCsv("pagos_registrados_" . date("Y-m-d_H-i") . ".csv", ["Empresa", "CUIT", "Tipo", "Periodo", "Fecha de pago", "Forma de pago", "Monto", "Observaciones"], $filas);
+}
+
+if (isset($_GET["exportar"]) && $_GET["exportar"] === "informe") {
+    $periodoExport = periodoParaInput($_GET["periodo"] ?? "");
+    $tipoExport = $_GET["tipo"] ?? "";
+    $tiposExport = in_array($tipoExport, ["Obra Social", "Sindicato", "Mutual"], true) ? [$tipoExport] : ["Obra Social", "Sindicato", "Mutual"];
+    $filas = [];
+
+    if (periodoValido($periodoExport)) {
+        foreach ($empresas as $empresa) {
+            if (!empresaActiva($empresa)) continue;
+            foreach ($tiposExport as $tipo) {
+                $esperado = 0;
+                $estado = "";
+                $acuerdo = acuerdoEmpresa($empresa, $tipo);
+                if (acuerdoValidoEmpresaTipo($empresa, $tipo) && periodoPerteneceAcuerdo($acuerdo, $periodoExport)) {
+                    $esperado = floatval($acuerdo["monto_cuota"] ?? 0);
+                    $estado = periodoEsCuotaPrevia($acuerdo, $periodoExport) ? "PAGADA PREVIA" : "PENDIENTE";
+                }
+
+                $pagosPeriodo = array_values(array_filter($pagos, fn($p) =>
+                    ($p["empresa_id"] ?? "") === ($empresa["id"] ?? "") &&
+                    ($p["tipo"] ?? "") === $tipo &&
+                    periodoParaInput($p["periodo"] ?? "") === $periodoExport
+                ));
+                $pagado = array_reduce($pagosPeriodo, fn($total, $p) => $total + floatval($p["monto"] ?? 0), 0);
+
+                if ($esperado <= 0 && $pagado <= 0) continue;
+                if ($pagado > 0) {
+                    $estado = $esperado <= 0 ? "EXTRA" : ($pagado >= $esperado ? "AL DIA" : "PARCIAL");
+                }
+                $pendiente = max($esperado - $pagado, 0);
+                if ($estado === "PAGADA PREVIA") $pendiente = 0;
+
+                $filas[] = [
+                    $empresa["razon"] ?? "",
+                    $empresa["cuit"] ?? "",
+                    $tipo,
+                    $periodoExport,
+                    implode(", ", array_filter(array_map(fn($p) => $p["fecha"] ?? "", $pagosPeriodo))),
+                    implode(", ", array_filter(array_map(fn($p) => $p["forma_pago"] ?? "", $pagosPeriodo))),
+                    $pagado,
+                    implode(" | ", array_filter(array_map(fn($p) => $p["observaciones"] ?? "", $pagosPeriodo))),
+                    $estado,
+                    $esperado,
+                    $pendiente
+                ];
+            }
+        }
+    }
+
+    enviarCsv("informe_periodo_" . ($periodoExport ? str_replace("/", "-", $periodoExport) : date("Y-m-d")) . ".csv", ["Empresa", "CUIT", "Tipo", "Periodo", "Fecha de pago", "Forma de pago", "Monto", "Observaciones", "Estado", "Cuota esperada", "Pendiente"], $filas);
+}
 
 if (isset($_POST["guardar_empresa"])) {
     $id = $_POST["empresa_id"] ?: uniqid("emp_");
@@ -452,7 +592,8 @@ if (isset($_POST["guardar_empresa"])) {
         "deuda_sindicato" => floatval($empresaExistente["deuda_sindicato"] ?? 0),
         "deuda_mutual" => floatval($empresaExistente["deuda_mutual"] ?? 0),
         "observaciones" => trim($_POST["observaciones_empresa"] ?? ""),
-        "fecha_carga" => date("Y-m-d H:i:s")
+        "fecha_carga" => date("Y-m-d H:i:s"),
+        "activa" => $empresaExistente ? empresaActiva($empresaExistente) : true
     ];
 
     if ($razonEmpresa === "") {
@@ -484,6 +625,11 @@ if (isset($_POST["guardar_empresa"])) {
         if (!$editado) $empresas[] = $nueva;
 
         guardarJson($empresasFile, $empresas);
+        registrarAuditoria(
+            $auditoriaFile,
+            $editado ? "editar_empresa" : "crear_empresa",
+            ($editado ? "Editó empresa " : "Creó empresa ") . detalleEmpresa($nueva)
+        );
         header("Location: index.php");
         exit;
     }
@@ -526,8 +672,12 @@ if (isset($_POST["guardar_acuerdo"])) {
     }
 
     if ($errorEmpresa === "") {
+        $acuerdoEditado = false;
+        $empresaAuditada = null;
         foreach ($empresas as $k => $emp) {
             if (($emp["id"] ?? "") === $empresaIdAcuerdo) {
+                $empresaAuditada = $emp;
+                $acuerdoEditado = isset($emp["acuerdos"]) && is_array($emp["acuerdos"]) && isset($emp["acuerdos"][$tipoAcuerdo]);
                 if (!isset($empresas[$k]["acuerdos"]) || !is_array($empresas[$k]["acuerdos"])) {
                     $empresas[$k]["acuerdos"] = [];
                 }
@@ -545,6 +695,11 @@ if (isset($_POST["guardar_acuerdo"])) {
         }
 
         guardarJson($empresasFile, $empresas);
+        registrarAuditoria(
+            $auditoriaFile,
+            $acuerdoEditado ? "editar_acuerdo" : "crear_acuerdo",
+            ($acuerdoEditado ? "Editó acuerdo de " : "Creó acuerdo de ") . (($empresaAuditada["razon"] ?? "Empresa") . " - " . $tipoAcuerdo . " - " . $periodoDesdeAcuerdo . " a " . $periodoHastaAcuerdo . " - " . dinero($montoTotalAcuerdo))
+        );
         header("Location: index.php#cargar-acuerdo");
         exit;
     }
@@ -630,6 +785,11 @@ if (isset($_POST["guardar_pago"])) {
         if (!$editado) $pagos[] = $nuevo;
 
         guardarJson($pagosFile, $pagos);
+        registrarAuditoria(
+            $auditoriaFile,
+            $editado ? "editar_pago" : "crear_pago",
+            ($editado ? "Editó pago de " : "Cargó pago de ") . detallePago($nuevo, $empresas)
+        );
         header("Location: index.php");
         exit;
     }
@@ -637,29 +797,43 @@ if (isset($_POST["guardar_pago"])) {
 
 if (isset($_GET["eliminar_empresa"])) {
     $id = $_GET["eliminar_empresa"];
-    foreach ($pagos as $p) {
-        if (($p["empresa_id"] ?? "") === $id) {
-            eliminarComprobantePago($p, $uploadDir);
+    $empresaBaja = null;
+    foreach ($empresas as $k => $empresa) {
+        if (($empresa["id"] ?? "") === $id) {
+            $empresas[$k]["activa"] = false;
+            $empresas[$k]["fecha_baja"] = date("Y-m-d H:i:s");
+            $empresas[$k]["baja_por"] = usuarioActual();
+            $empresaBaja = $empresas[$k];
+            break;
         }
     }
-    $empresas = array_values(array_filter($empresas, fn($e) => ($e["id"] ?? "") !== $id));
-    $pagos = array_values(array_filter($pagos, fn($p) => ($p["empresa_id"] ?? "") !== $id));
     guardarJson($empresasFile, $empresas);
-    guardarJson($pagosFile, $pagos);
+    if ($empresaBaja) {
+        registrarAuditoria($auditoriaFile, "dar_de_baja_empresa", "Dio de baja empresa " . detalleEmpresa($empresaBaja));
+    }
     header("Location: index.php");
     exit;
 }
 
 if (isset($_GET["eliminar_pago"])) {
     $id = $_GET["eliminar_pago"];
+    $pagoEliminado = null;
     foreach ($pagos as $p) {
         if (($p["id"] ?? "") === $id) {
-            eliminarComprobantePago($p, $uploadDir);
+            $pagoEliminado = $p;
             break;
         }
     }
-    $pagos = array_values(array_filter($pagos, fn($p) => ($p["id"] ?? "") !== $id));
-    guardarJson($pagosFile, $pagos);
+    if ($pagoEliminado) {
+        $pagoEliminado["eliminado_por"] = usuarioActual();
+        $pagoEliminado["fecha_eliminacion"] = date("Y-m-d H:i:s");
+        $pagoEliminado["motivo"] = trim($_GET["motivo"] ?? "");
+        $papeleraPagos[] = $pagoEliminado;
+        $pagos = array_values(array_filter($pagos, fn($p) => ($p["id"] ?? "") !== $id));
+        guardarJson($pagosFile, $pagos);
+        guardarJson($papeleraPagosFile, $papeleraPagos);
+        registrarAuditoria($auditoriaFile, "eliminar_pago", "Eliminó pago de " . detallePago($pagoEliminado, $empresas));
+    }
     header("Location: index.php");
     exit;
 }
@@ -674,6 +848,7 @@ if (isset($_GET["eliminar_acuerdo"], $_GET["tipo_acuerdo"])) {
             if (isset($empresas[$k]["acuerdos"]) && is_array($empresas[$k]["acuerdos"])) {
                 unset($empresas[$k]["acuerdos"][$tipoAcuerdoEliminar]);
             }
+            registrarAuditoria($auditoriaFile, "eliminar_acuerdo", "Eliminó acuerdo de " . (($empresas[$k]["razon"] ?? "Empresa") . " - " . $tipoAcuerdoEliminar));
             break;
         }
         guardarJson($empresasFile, $empresas);
@@ -764,10 +939,19 @@ $cobradoOS = 0;
 $cobradoSindicato = 0;
 $cobradoMutual = 0;
 $cantidadPagos = count($pagos);
+$periodoActual = date("m/y");
+$mesActual = date("Y-m");
+$empresasActivas = count(array_filter($empresas, fn($empresa) => empresaActiva($empresa)));
+$pagosEsteMes = 0;
+$totalCobradoEsteMes = 0;
 
 foreach ($pagos as $p) {
     $monto = floatval($p["monto"] ?? 0);
     $totalCobrado += $monto;
+    if (substr($p["fecha"] ?? "", 0, 7) === $mesActual) {
+        $pagosEsteMes++;
+        $totalCobradoEsteMes += $monto;
+    }
 
     if (($p["tipo"] ?? "") === "Obra Social") {
         $cobradoOS += $monto;
@@ -782,6 +966,18 @@ $totalCobrado = max($totalCobrado, 0);
 $cobradoOS = max($cobradoOS, 0);
 $cobradoSindicato = max($cobradoSindicato, 0);
 $cobradoMutual = max($cobradoMutual, 0);
+$totalCobradoEsteMes = max($totalCobradoEsteMes, 0);
+$deudoresPeriodoActual = 0;
+foreach ($empresas as $empresa) {
+    if (!empresaActiva($empresa)) continue;
+    foreach (["Obra Social", "Sindicato", "Mutual"] as $tipo) {
+        $acuerdo = acuerdoEmpresa($empresa, $tipo);
+        if (!acuerdoValidoEmpresaTipo($empresa, $tipo) || !periodoPerteneceAcuerdo($acuerdo, $periodoActual) || periodoEsCuotaPrevia($acuerdo, $periodoActual)) continue;
+        if (!existePagoEmpresaTipoPeriodo($pagos, $empresa["id"] ?? "", $tipo, $periodoActual)) {
+            $deudoresPeriodoActual++;
+        }
+    }
+}
 $tabInicial = $editarPago ? "cargar-pago" : ($editarEmpresa ? "nueva-empresa" : ((isset($_POST["guardar_acuerdo"]) && $errorEmpresa !== "") ? "cargar-acuerdo" : "inicio"));
 ?>
 <!DOCTYPE html>
@@ -795,6 +991,7 @@ header{background:#087a46;color:white;padding:18px 25px;display:flex;justify-con
 header h1{margin:0;font-size:24px}
 header a{color:white;text-decoration:none;font-weight:bold}
 .header-actions{display:flex;gap:12px;align-items:center}
+.usuario-header{font-weight:bold;color:#eaf7f0}
 main{padding:20px}
 .tabs{display:flex;flex-wrap:wrap;gap:8px;background:white;padding:12px 20px;border-bottom:1px solid #dcefe6;position:sticky;top:0;z-index:5}
 .tab-btn{width:auto;background:#eaf7f0;color:#087a46;border:1px solid #b9dfcc;padding:10px 13px}
@@ -890,7 +1087,7 @@ textarea:focus-visible{
 .filters{background:#f7fbf9;border:1px solid #dcefe6;border-radius:12px;padding:14px;margin:12px 0 16px}
 .filters-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto;gap:10px;align-items:center}
 .filters-grid.empresas{grid-template-columns:1.2fr 1.2fr 2fr 1fr auto}
-.filters-grid.informe{grid-template-columns:1fr 1fr auto}
+.filters-grid.informe{grid-template-columns:1fr 1fr auto auto}
 .filters input,.filters select{width:100%;background:white}
 .filters button{white-space:nowrap}
 .informe-resumen{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:12px 0 16px}
@@ -933,6 +1130,7 @@ th{background:#087a46;color:white}
 <header>
 <h1>Registro de Pagos - Empresas Deudoras</h1>
 <div class="header-actions">
+<span class="usuario-header">Usuario: <?= e(usuarioActual()) ?></span>
 <a href="?backup=1">&#x2B07; Backup</a>
 <a href="?logout=1">Salir</a>
 </div>
@@ -946,6 +1144,7 @@ th{background:#087a46;color:white}
 <button type="button" class="tab-btn" data-tab="nueva-empresa">Nueva empresa</button>
 <button type="button" class="tab-btn" data-tab="informe-periodo">Informe período</button>
 <button type="button" class="tab-btn" data-tab="pagos">Pagos registrados</button>
+<button type="button" class="tab-btn" data-tab="auditoria">Auditoría</button>
 </nav>
 
 <main>
@@ -955,11 +1154,11 @@ th{background:#087a46;color:white}
 
 <section class="tab-panel active" id="tab-inicio">
 <div class="card resumen">
-<div class="box"><div class="label">Total cobrado</div><div class="num"><?= dinero($totalCobrado) ?></div></div>
-<div class="box"><div class="label">Cobrado Obra Social</div><div class="num"><?= dinero($cobradoOS) ?></div></div>
-<div class="box"><div class="label">Cobrado Sindicato</div><div class="num"><?= dinero($cobradoSindicato) ?></div></div>
-<div class="box"><div class="label">Cobrado Mutual</div><div class="num"><?= dinero($cobradoMutual) ?></div></div>
-<div class="box"><div class="label">Pagos registrados</div><div class="num"><?= e($cantidadPagos) ?></div></div>
+<div class="box"><div class="label">Empresas activas</div><div class="num"><?= e($empresasActivas) ?></div></div>
+<div class="box"><div class="label">Pagos registrados este mes</div><div class="num"><?= e($pagosEsteMes) ?></div></div>
+<div class="box"><div class="label">Total cobrado este mes</div><div class="num"><?= dinero($totalCobradoEsteMes) ?></div></div>
+<div class="box"><div class="label">Total cobrado general</div><div class="num"><?= dinero($totalCobrado) ?></div></div>
+<div class="box"><div class="label">Deudores <?= e($periodoActual) ?></div><div class="num"><?= e($deudoresPeriodoActual) ?></div></div>
 </div>
 
 <div class="card">
@@ -983,6 +1182,9 @@ th{background:#087a46;color:white}
 <button type="button" class="toggle-card">Minimizar</button>
 </div>
 <div class="card-body">
+<?php if($editarEmpresa): ?>
+<p><span class="estado <?= empresaActiva($editarEmpresa) ? 'estado-ok' : 'estado-deudor' ?>"><?= empresaActiva($editarEmpresa) ? 'Activa' : 'Inactiva' ?></span></p>
+<?php endif; ?>
 
 <form method="post" id="empresaForm">
 <input type="hidden" name="empresa_id" value="<?= e($editarEmpresa["id"] ?? "") ?>">
@@ -1242,6 +1444,7 @@ Comprobante actual:
 <option value="Mutual">Mutual</option>
 </select>
 <button type="button" id="generarInformePeriodo">Consultar</button>
+<a class="btn-secundario" id="exportarInformePeriodo" href="?exportar=informe">Exportar Excel</a>
 </div>
 </div>
 
@@ -1329,9 +1532,14 @@ Comprobante actual:
 </select>
 <input type="text" id="filtroEmpresaTexto" placeholder="Buscar por razón social o CUIT">
 <select id="filtroEmpresaEstado">
-<option value="">Todas</option>
+<option value="">Estado deuda: Todas</option>
 <option value="deuda">Con deuda</option>
 <option value="cancelada">Canceladas</option>
+</select>
+<select id="filtroEmpresaActiva">
+<option value="activas">Activas</option>
+<option value="inactivas">Inactivas</option>
+<option value="todas">Todas</option>
 </select>
 <button type="button" id="limpiarFiltrosEmpresas">Limpiar filtros</button>
 </div>
@@ -1342,6 +1550,7 @@ Comprobante actual:
 <tr>
 <th>Razón Social</th>
 <th>CUIT</th>
+<th>Estado</th>
 <th>Monto total</th>
 <th>Plan</th>
 <th>Cuotas</th>
@@ -1360,10 +1569,11 @@ Comprobante actual:
 </thead>
 <tbody>
 <?php if(empty($empresas)): ?>
-<tr><td colspan="16" class="sin">Todavía no hay empresas cargadas.</td></tr>
+<tr><td colspan="17" class="sin">Todavía no hay empresas cargadas.</td></tr>
 <?php endif; ?>
 
 <?php foreach($empresas as $emp):
+$activaEmpresa = empresaActiva($emp);
 $resumenOS = resumenFinancieroEmpresaTipo($emp, "Obra Social", $pagos);
 $resumenSind = resumenFinancieroEmpresaTipo($emp, "Sindicato", $pagos);
 $resumenMutual = resumenFinancieroEmpresaTipo($emp, "Mutual", $pagos);
@@ -1411,9 +1621,10 @@ $categoriaOS = ($deudaOS > 0 || $pagadoOS > 0) ? "1" : "0";
 $categoriaSind = ($deudaSind > 0 || $pagadoSind > 0) ? "1" : "0";
 $categoriaMutual = ($deudaMutual > 0 || $pagadoMutual > 0) ? "1" : "0";
 ?>
-<tr class="fila-empresa" data-busqueda="<?= e(($emp["razon"] ?? "") . " " . ($emp["cuit"] ?? "")) ?>" data-estado="<?= e($estadoEmpresa) ?>" data-plan="<?= e($planFiltroEmpresa) ?>" data-os="<?= e($categoriaOS) ?>" data-sindicato="<?= e($categoriaSind) ?>" data-mutual="<?= e($categoriaMutual) ?>">
+<tr class="fila-empresa" data-busqueda="<?= e(($emp["razon"] ?? "") . " " . ($emp["cuit"] ?? "")) ?>" data-estado="<?= e($estadoEmpresa) ?>" data-activa="<?= $activaEmpresa ? '1' : '0' ?>" data-plan="<?= e($planFiltroEmpresa) ?>" data-os="<?= e($categoriaOS) ?>" data-sindicato="<?= e($categoriaSind) ?>" data-mutual="<?= e($categoriaMutual) ?>">
 <td><?= e($emp["razon"]) ?></td>
 <td><?= e($emp["cuit"]) ?></td>
+<td><span class="estado <?= $activaEmpresa ? 'estado-ok' : 'estado-deudor' ?>"><?= $activaEmpresa ? 'Activa' : 'Inactiva' ?></span></td>
 <td><?= dinero($montoTotalEmpresa) ?></td>
 <td><?= e($planEmpresa) ?></td>
 <td><?= e($cuotasEmpresa) ?></td>
@@ -1429,7 +1640,9 @@ $categoriaMutual = ($deudaMutual > 0 || $pagadoMutual > 0) ? "1" : "0";
 <td class="<?= $saldoMutual <= 0 ? 'saldo-ok' : 'saldo-debe' ?>"><?= dinero($saldoMutual) ?></td>
 <td class="acciones">
 <a href="?editar_empresa=<?= e($emp["id"]) ?>" title="Editar empresa">✏️</a>
-<a class="btn-danger" href="?eliminar_empresa=<?= e($emp["id"]) ?>" onclick="return confirm('Esto elimina la empresa y todos sus pagos. ¿Seguro?')" title="Eliminar empresa" aria-label="Eliminar empresa">🗑️</a>
+<?php if($activaEmpresa): ?>
+<a class="btn-danger" href="?eliminar_empresa=<?= e($emp["id"]) ?>" onclick="return confirm('La empresa quedará inactiva y sus pagos se conservarán. ¿Dar de baja empresa?')" title="Dar de baja empresa" aria-label="Dar de baja empresa">🗑️</a>
+<?php endif; ?>
 </td>
 </tr>
 <?php endforeach; ?>
@@ -1443,6 +1656,7 @@ $categoriaMutual = ($deudaMutual > 0 || $pagadoMutual > 0) ? "1" : "0";
 <div class="card collapsible-card" id="pagos" data-card="pagos">
 <div class="card-header">
 <h2>Pagos registrados</h2>
+<a class="btn-secundario" href="?exportar=pagos">Exportar Excel</a>
 <button type="button" class="toggle-card">Minimizar</button>
 </div>
 <div class="card-body">
@@ -1510,6 +1724,41 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 <a href="?editar_pago=<?= e($p["id"]) ?>" title="Editar pago">✏️</a>
 <a class="btn-danger" href="?eliminar_pago=<?= e($p["id"]) ?>" onclick="return confirm('¿Eliminar este pago? Esta acción no elimina la empresa.')" title="Eliminar pago" aria-label="Eliminar pago">🗑️</a>
 </td>
+</tr>
+<?php endforeach; ?>
+</tbody>
+</table>
+</div>
+</div>
+</section>
+
+<section class="tab-panel" id="tab-auditoria">
+<div class="card collapsible-card" id="auditoria" data-card="auditoria">
+<div class="card-header">
+<h2>Auditoría</h2>
+<button type="button" class="toggle-card">Minimizar</button>
+</div>
+<div class="card-body">
+<table>
+<thead>
+<tr>
+<th>Fecha y hora</th>
+<th>Usuario</th>
+<th>Acción</th>
+<th>Detalle</th>
+</tr>
+</thead>
+<tbody>
+<?php $auditoriaOrdenada = array_reverse($auditoria); ?>
+<?php if(empty($auditoriaOrdenada)): ?>
+<tr><td colspan="4" class="sin">Todavía no hay movimientos registrados.</td></tr>
+<?php endif; ?>
+<?php foreach(array_slice($auditoriaOrdenada, 0, 200) as $movimiento): ?>
+<tr>
+<td><?= e($movimiento["fecha"] ?? "") ?></td>
+<td><?= e($movimiento["usuario"] ?? "") ?></td>
+<td><span class="badge"><?= e($movimiento["accion"] ?? "") ?></span></td>
+<td><?= e($movimiento["detalle"] ?? "") ?></td>
 </tr>
 <?php endforeach; ?>
 </tbody>
@@ -2034,8 +2283,8 @@ function distanciaEdicion(a, b) {
 }
 
 function coincideBusqueda(valor, consulta) {
-    const texto = normalizarTexto(valor);
-    const terminos = normalizarTexto(consulta).split(" ").filter(Boolean);
+    const texto = normalizarRazonEmpresa(valor);
+    const terminos = normalizarRazonEmpresa(consulta).split(" ").filter(Boolean);
     if (!terminos.length) return true;
     const palabras = texto.split(" ").filter(Boolean);
     const textoCompacto = texto.replace(/\s/g, "");
@@ -2056,7 +2305,7 @@ function textoNormalizado(valor) {
 }
 
 function escapeHtml(valor) {
-    return (valor ?? "").toString().replace(/[&<>"']/g, (char) => ({
+    return (valor ? "").toString().replace(/[&<>"']/g, (char) => ({
         "&": "&amp;",
         "<": "&lt;",
         ">": "&gt;",
@@ -2200,6 +2449,10 @@ function obtenerEmpresa(id) {
     return empresasData.find((empresa) => (empresa.id || "") === (id || "")) || null;
 }
 
+function empresaActivaCliente(empresa) {
+    return !empresa || empresa.activa !== false;
+}
+
 function etiquetaEmpresa(empresa) {
     return empresa ? `${empresa.razon || ""} - ${empresa.cuit || ""}`.trim() : "";
 }
@@ -2277,6 +2530,7 @@ function configurarEmpresaPickers() {
             }
 
             const coincidencias = empresasData
+                .filter((empresa) => empresaActivaCliente(empresa))
                 .filter((empresa) => coincideBusqueda((empresa.razon || "") + " " + (empresa.cuit || ""), texto))
                 .slice(0, 30);
 
@@ -2317,22 +2571,25 @@ function configurarFiltrosEmpresas() {
     const plan = document.getElementById("filtroEmpresaPlan");
     const texto = document.getElementById("filtroEmpresaTexto");
     const estado = document.getElementById("filtroEmpresaEstado");
+    const activa = document.getElementById("filtroEmpresaActiva");
     const limpiar = document.getElementById("limpiarFiltrosEmpresas");
     const filas = Array.from(document.querySelectorAll(".fila-empresa"));
-    if (!categoria || !plan || !texto || !estado || !limpiar) return;
+    if (!categoria || !plan || !texto || !estado || !activa || !limpiar) return;
 
     const aplicar = () => {
         const categoriaValor = categoria.value;
         const planValor = plan.value;
         const busqueda = normalizarTexto(texto.value);
         const estadoValor = estado.value;
+        const activaValor = activa.value;
 
         filas.forEach((fila) => {
             const coincideCategoria = !categoriaValor || fila.dataset[categoriaValor] === "1";
             const coincidePlan = !planValor || fila.dataset.plan === planValor;
             const coincideTexto = coincideBusqueda(fila.dataset.busqueda, busqueda);
             const coincideEstado = !estadoValor || fila.dataset.estado === estadoValor;
-            fila.classList.toggle("fila-oculta", !(coincideCategoria && coincidePlan && coincideTexto && coincideEstado));
+            const coincideActiva = activaValor === "todas" || (activaValor === "activas" && fila.dataset.activa === "1") || (activaValor === "inactivas" && fila.dataset.activa === "0");
+            fila.classList.toggle("fila-oculta", !(coincideCategoria && coincidePlan && coincideTexto && coincideEstado && coincideActiva));
         });
     };
 
@@ -2340,13 +2597,16 @@ function configurarFiltrosEmpresas() {
     plan.addEventListener("change", aplicar);
     texto.addEventListener("input", aplicar);
     estado.addEventListener("change", aplicar);
+    activa.addEventListener("change", aplicar);
     limpiar.addEventListener("click", () => {
         categoria.value = "";
         plan.value = "";
         texto.value = "";
         estado.value = "";
+        activa.value = "activas";
         aplicar();
     });
+    aplicar();
 }
 
 function configurarFiltrosPagos() {
@@ -2466,9 +2726,33 @@ function seleccionarEmpresaFicha(empresaId) {
     });
 
     const pagosEmpresa = pagosData.filter((pago) => (pago.empresa_id || "") === (empresa.id || ""));
+    const totalGeneral = pagosEmpresa.reduce((total, pago) => total + (Number(pago.monto) || 0), 0);
+    const totalPorTipo = (tipo) => pagosEmpresa
+        .filter((pago) => (pago.tipo || "") === tipo)
+        .reduce((total, pago) => total + (Number(pago.monto) || 0), 0);
+    const ultimoPago = [...pagosEmpresa].sort((a, b) => ((b.fecha || b.fecha_carga || "").toString()).localeCompare((a.fecha || a.fecha_carga || "").toString()))[0] || null;
+    const acuerdosActivos = tiposInforme.filter((tipo) => tieneDatosAcuerdo(empresa, tipo)).length;
+    const cuotasPendientesEstimadas = tiposInforme.reduce((total, tipo) => {
+        const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
+        if (!tieneDatosAcuerdo(empresa, tipo)) return total;
+        const cantidad = Math.max(Number(acuerdo.cantidad_cuotas || 0), 0);
+        const previas = Math.max(Number(acuerdo.cuotas_pagadas_previas || 0), 0);
+        const cuotasSistema = pagosEmpresa.filter((pago) => (pago.tipo || "") === tipo && esCuotaAcuerdoPago(pago, empresa, tipo)).length;
+        return total + Math.max(cantidad - previas - cuotasSistema, 0);
+    }, 0);
     ficha.innerHTML = `
 <h3>${escapeHtml(empresa.razon || "")}</h3>
 <p><strong>CUIT:</strong> ${escapeHtml(empresa.cuit || "")}</p>
+<p><span class="estado ${empresaActivaCliente(empresa) ? "estado-ok" : "estado-deudor"}">${empresaActivaCliente(empresa) ? "Activa" : "Inactiva"}</span></p>
+<div class="empresa-ficha-grid">
+<div class="box"><div class="label">Total cobrado general</div><div class="num">${dineroCliente(totalGeneral)}</div></div>
+<div class="box"><div class="label">Total cobrado Obra Social</div><div class="num">${dineroCliente(totalPorTipo("Obra Social"))}</div></div>
+<div class="box"><div class="label">Total cobrado Sindicato</div><div class="num">${dineroCliente(totalPorTipo("Sindicato"))}</div></div>
+<div class="box"><div class="label">Total cobrado Mutual</div><div class="num">${dineroCliente(totalPorTipo("Mutual"))}</div></div>
+<div class="box"><div class="label">Último pago registrado</div><div>${ultimoPago ? `${escapeHtml(periodoNormalizado(ultimoPago.periodo || ""))} - ${escapeHtml(ultimoPago.fecha || "")} - ${dineroCliente(ultimoPago.monto)}` : '<span class="sin">Sin pagos</span>'}</div></div>
+<div class="box"><div class="label">Acuerdos activos</div><div class="num">${acuerdosActivos}</div></div>
+<div class="box"><div class="label">Cuotas pendientes estimadas</div><div class="num">${cuotasPendientesEstimadas}</div></div>
+</div>
 <div class="empresa-ficha-grid">
 ${saldos.map((s) => `<div class="box"><div class="label">${escapeHtml(s.tipo)}</div><div>Deuda: ${dineroCliente(s.deuda)}</div><div>Cobrado: ${dineroCliente(s.cobrado)}</div><div>Saldo: ${dineroCliente(s.saldo)}</div></div>`).join("")}
 </div>
@@ -2479,7 +2763,7 @@ ${saldos.map((s) => `<div class="box"><div class="label">${escapeHtml(s.tipo)}</
 ${pagosEmpresa.length ? `<table><thead><tr><th>Fecha</th><th>Tipo</th><th>Período</th><th>Monto</th><th>Forma</th><th>Acciones</th></tr></thead><tbody>${pagosEmpresa.map((pago) => `<tr><td>${escapeHtml(pago.fecha || "")}</td><td>${escapeHtml(pago.tipo || "")}</td><td>${escapeHtml(periodoNormalizado(pago.periodo || ""))}</td><td>${dineroCliente(pago.monto)}</td><td>${escapeHtml(pago.forma_pago || "")}</td><td><a class="btn-danger" href="?eliminar_pago=${encodeURIComponent(pago.id || "")}" onclick="return confirm('¿Eliminar este pago? Esta acción no elimina la empresa.')" title="Eliminar pago" aria-label="Eliminar pago">🗑️</a></td></tr>`).join("")}</tbody></table>` : '<p class="sin">Sin pagos registrados.</p>'}
 <br>
 <a class="btn-secundario" href="?editar_empresa=${encodeURIComponent(empresa.id || "")}">Editar empresa</a>
-<a class="btn-danger" href="?eliminar_empresa=${encodeURIComponent(empresa.id || "")}" onclick="return confirm('Esto elimina la empresa y todos sus pagos asociados. ¿Seguro?')" title="Eliminar empresa" aria-label="Eliminar empresa">🗑️</a>
+${empresaActivaCliente(empresa) ? `<a class="btn-danger" href="?eliminar_empresa=${encodeURIComponent(empresa.id || "")}" onclick="return confirm('La empresa quedará inactiva y sus pagos se conservarán. ¿Dar de baja empresa?')" title="Dar de baja empresa" aria-label="Dar de baja empresa">🗑️</a>` : ""}
 <button type="button" class="btn-small ficha-cargar-pago" data-empresa="${escapeHtml(empresa.id || "")}">Cargar pago</button>
 <button type="button" class="btn-small ficha-cargar-acuerdo" data-empresa="${escapeHtml(empresa.id || "")}">Cargar acuerdo</button>
 `;
@@ -2496,6 +2780,7 @@ function renderResultadosEmpresa(input, contenedor, limite = 12) {
     }
 
     const resultados = empresasData
+        .filter((empresa) => empresaActivaCliente(empresa))
         .filter((empresa) => coincideBusqueda((empresa.razon || "") + " " + (empresa.cuit || ""), texto))
         .slice(0, limite);
 
@@ -2639,12 +2924,16 @@ function configurarInformePeriodo() {
     const periodoEl = document.getElementById("informePeriodoConsultado");
     const pagaronBody = document.getElementById("informePagaronBody");
     const noPagaronBody = document.getElementById("informeNoPagaronBody");
+    const exportar = document.getElementById("exportarInformePeriodo");
 
     if (!periodoInput || !tipoInput || !consultar || !esperadoEl || !totalEl || !pendienteEl || !pagaronEl || !noPagaronEl || !periodoEl || !pagaronBody || !noPagaronBody) return;
 
     const render = () => {
         const periodo = periodoInput.value;
         const tiposSeleccionados = tipoInput.value ? [tipoInput.value] : tiposInforme;
+        if (exportar) {
+            exportar.href = `?exportar=informe&periodo=${encodeURIComponent(periodo)}&tipo=${encodeURIComponent(tipoInput.value || "")}`;
+        }
 
         if (!periodoValidoCliente(periodo)) {
             esperadoEl.textContent = "$0,00";
@@ -2690,7 +2979,7 @@ function configurarInformePeriodo() {
         let totalEsperado = 0;
         let totalCubiertoPrevio = 0;
 
-        empresasData.forEach((empresa) => {
+        empresasData.filter((empresa) => empresaActivaCliente(empresa)).forEach((empresa) => {
             tiposSeleccionados.forEach((tipo) => {
                 const clave = (empresa.id || "") + "|" + tipo + "|cuota";
                 const esperadoPorAcuerdo = cuotaEsperadaEmpresaPeriodo(empresa, periodo, tipo);
