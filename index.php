@@ -1088,6 +1088,7 @@ textarea:focus-visible{
 .filters-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto;gap:10px;align-items:center}
 .filters-grid.empresas{grid-template-columns:1.2fr 1.2fr 2fr 1fr auto}
 .filters-grid.informe{grid-template-columns:1fr 1fr auto auto}
+.filters-grid.auditoria{grid-template-columns:1fr 1.2fr 2fr 1fr 1fr auto auto}
 .filters input,.filters select{width:100%;background:white}
 .filters button{white-space:nowrap}
 .informe-resumen{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:12px 0 16px}
@@ -1122,7 +1123,7 @@ th{background:#087a46;color:white}
 .empresa-coincidencia:first-of-type{border-top:0}
 .empresa-coincidencia button{width:auto;white-space:nowrap}
 .fila-oculta{display:none}
-@media(max-width:1000px){.grid,.resumen,.home-actions,.empresa-ficha-grid,.filters-grid,.filters-grid.empresas,.filters-grid.informe,.informe-resumen,.resumen-acuerdo-grid{grid-template-columns:1fr}table{display:block;overflow-x:auto}}
+@media(max-width:1000px){.grid,.resumen,.home-actions,.empresa-ficha-grid,.filters-grid,.filters-grid.empresas,.filters-grid.informe,.filters-grid.auditoria,.informe-resumen,.resumen-acuerdo-grid{grid-template-columns:1fr}table{display:block;overflow-x:auto}}
 </style>
 </head>
 <body>
@@ -1739,6 +1740,35 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 <button type="button" class="toggle-card">Minimizar</button>
 </div>
 <div class="card-body">
+<div class="filters">
+<div class="filters-grid auditoria">
+<select id="filtroAuditoriaUsuario">
+<option value="">Todos</option>
+<option value="AGUERO">AGUERO</option>
+<option value="MONTELEONE">MONTELEONE</option>
+<option value="ESCUDERO">ESCUDERO</option>
+<option value="SISTEMA">SISTEMA</option>
+</select>
+<select id="filtroAuditoriaAccion">
+<option value="">Todas</option>
+<option value="crear_empresa">Crear empresa</option>
+<option value="editar_empresa">Editar empresa</option>
+<option value="dar_de_baja_empresa">Dar de baja empresa</option>
+<option value="crear_acuerdo">Crear acuerdo</option>
+<option value="editar_acuerdo">Editar acuerdo</option>
+<option value="eliminar_acuerdo">Eliminar acuerdo</option>
+<option value="crear_pago">Crear pago</option>
+<option value="editar_pago">Editar pago</option>
+<option value="eliminar_pago">Eliminar pago</option>
+<option value="descargar_backup">Descargar backup</option>
+</select>
+<input type="text" id="filtroAuditoriaTexto" placeholder="Buscar en detalle">
+<input type="date" id="filtroAuditoriaDesde">
+<input type="date" id="filtroAuditoriaHasta">
+<button type="button" id="limpiarFiltrosAuditoria">Limpiar filtros</button>
+<button type="button" id="exportarAuditoriaCsv">Exportar auditoría CSV</button>
+</div>
+</div>
 <table>
 <thead>
 <tr>
@@ -1754,13 +1784,14 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 <tr><td colspan="4" class="sin">Todavía no hay movimientos registrados.</td></tr>
 <?php endif; ?>
 <?php foreach(array_slice($auditoriaOrdenada, 0, 200) as $movimiento): ?>
-<tr>
+<tr class="fila-auditoria" data-usuario="<?= e($movimiento["usuario"] ?? "") ?>" data-accion="<?= e($movimiento["accion"] ?? "") ?>" data-fecha="<?= e(substr($movimiento["fecha"] ?? "", 0, 10)) ?>" data-detalle="<?= e($movimiento["detalle"] ?? "") ?>">
 <td><?= e($movimiento["fecha"] ?? "") ?></td>
 <td><?= e($movimiento["usuario"] ?? "") ?></td>
 <td><span class="badge"><?= e($movimiento["accion"] ?? "") ?></span></td>
 <td><?= e($movimiento["detalle"] ?? "") ?></td>
 </tr>
 <?php endforeach; ?>
+<tr id="auditoriaSinResultados" class="fila-oculta"><td colspan="4" class="sin">No se encontraron movimientos con esos filtros.</td></tr>
 </tbody>
 </table>
 </div>
@@ -2644,6 +2675,78 @@ function configurarFiltrosPagos() {
     });
 }
 
+function configurarFiltrosAuditoria() {
+    const usuario = document.getElementById("filtroAuditoriaUsuario");
+    const accion = document.getElementById("filtroAuditoriaAccion");
+    const texto = document.getElementById("filtroAuditoriaTexto");
+    const desde = document.getElementById("filtroAuditoriaDesde");
+    const hasta = document.getElementById("filtroAuditoriaHasta");
+    const limpiar = document.getElementById("limpiarFiltrosAuditoria");
+    const exportar = document.getElementById("exportarAuditoriaCsv");
+    const sinResultados = document.getElementById("auditoriaSinResultados");
+    const filas = Array.from(document.querySelectorAll(".fila-auditoria"));
+    if (!usuario || !accion || !texto || !desde || !hasta || !limpiar || !exportar) return;
+
+    const aplicar = () => {
+        const usuarioValor = usuario.value;
+        const accionValor = accion.value;
+        const textoValor = texto.value;
+        const desdeValor = desde.value;
+        const hastaValor = hasta.value;
+        let visibles = 0;
+
+        filas.forEach((fila) => {
+            const coincideUsuario = !usuarioValor || fila.dataset.usuario === usuarioValor;
+            const coincideAccion = !accionValor || fila.dataset.accion === accionValor;
+            const coincideTexto = coincideBusqueda(fila.dataset.detalle || "", textoValor);
+            const fecha = fila.dataset.fecha || "";
+            const coincideDesde = !desdeValor || (fecha && fecha >= desdeValor);
+            const coincideHasta = !hastaValor || (fecha && fecha <= hastaValor);
+            const visible = coincideUsuario && coincideAccion && coincideTexto && coincideDesde && coincideHasta;
+            fila.classList.toggle("fila-oculta", !visible);
+            if (visible) visibles++;
+        });
+
+        if (sinResultados) sinResultados.classList.toggle("fila-oculta", filas.length === 0 || visibles > 0);
+    };
+
+    const csvCampo = (valor) => `"${(valor ?? "").toString().replace(/"/g, '""')}"`;
+    const exportarCsv = () => {
+        aplicar();
+        const filasVisibles = filas.filter((fila) => !fila.classList.contains("fila-oculta"));
+        const lineas = [["Fecha", "Usuario", "Acción", "Detalle"].map(csvCampo).join(";")];
+        filasVisibles.forEach((fila) => {
+            const celdas = Array.from(fila.children).map((celda) => celda.textContent.trim());
+            lineas.push(celdas.map(csvCampo).join(";"));
+        });
+
+        const blob = new Blob(["\uFEFF" + lineas.join("\n")], { type: "text/csv;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const enlace = document.createElement("a");
+        enlace.href = url;
+        enlace.download = "auditoria_" + new Date().toISOString().slice(0, 10) + ".csv";
+        document.body.appendChild(enlace);
+        enlace.click();
+        enlace.remove();
+        URL.revokeObjectURL(url);
+    };
+
+    [usuario, accion, texto, desde, hasta].forEach((control) => {
+        control.addEventListener(control.tagName === "INPUT" && control.type === "text" ? "input" : "change", aplicar);
+    });
+
+    limpiar.addEventListener("click", () => {
+        usuario.value = "";
+        accion.value = "";
+        texto.value = "";
+        desde.value = "";
+        hasta.value = "";
+        aplicar();
+    });
+    exportar.addEventListener("click", exportarCsv);
+    aplicar();
+}
+
 function totalPagadoCliente(empresaId, tipo) {
     return pagosData.reduce((total, pago) => {
         if ((pago.empresa_id || "") === empresaId && (pago.tipo || "") === tipo) {
@@ -3153,6 +3256,7 @@ configurarBuscadoresEmpresa();
 configurarInformePeriodo();
 configurarFiltrosEmpresas();
 configurarFiltrosPagos();
+configurarFiltrosAuditoria();
 </script>
 </body>
 </html>
