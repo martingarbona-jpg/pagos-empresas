@@ -2305,7 +2305,7 @@ function textoNormalizado(valor) {
 }
 
 function escapeHtml(valor) {
-    return (valor ? "").toString().replace(/[&<>"']/g, (char) => ({
+    return (valor ?? "").toString().replace(/[&<>"']/g, (char) => ({
         "&": "&amp;",
         "<": "&lt;",
         ">": "&gt;",
