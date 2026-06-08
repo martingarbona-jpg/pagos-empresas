@@ -93,6 +93,83 @@ function eliminarComprobantePago($pago, $uploadDir) {
     }
 }
 
+function agregarDirectorioZip($zip, $directorio, $nombreEnZip) {
+    if (!is_dir($directorio)) return true;
+
+    $nombreEnZip = trim(str_replace("\\", "/", $nombreEnZip), "/");
+    if ($nombreEnZip !== "") {
+        $zip->addEmptyDir($nombreEnZip);
+    }
+
+    $archivos = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($directorio, FilesystemIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::SELF_FIRST
+    );
+
+    foreach ($archivos as $archivo) {
+        $ruta = $archivo->getPathname();
+        $relativa = substr($ruta, strlen($directorio) + 1);
+        $rutaZip = $nombreEnZip . "/" . str_replace("\\", "/", $relativa);
+
+        if ($archivo->isDir()) {
+            $zip->addEmptyDir($rutaZip);
+        } elseif (!$zip->addFile($ruta, $rutaZip)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function enviarBackupManual($empresasFile, $pagosFile, $uploadDir) {
+    if (!class_exists("ZipArchive")) return false;
+
+    $nombreDescarga = "backup_" . date("Y-m-d_H-i") . ".zip";
+    $zipTemporal = tempnam(sys_get_temp_dir(), "backup_pagos_");
+    if ($zipTemporal === false) return false;
+
+    $zip = new ZipArchive();
+    if ($zip->open($zipTemporal, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+        @unlink($zipTemporal);
+        return false;
+    }
+
+    $ok = true;
+    $ok = $ok && is_file($empresasFile) && $zip->addFile($empresasFile, "empresas.json");
+    $ok = $ok && is_file($pagosFile) && $zip->addFile($pagosFile, "pagos.json");
+    $ok = $ok && agregarDirectorioZip($zip, $uploadDir, "comprobantes");
+
+    if (!$zip->close() || !$ok) {
+        @unlink($zipTemporal);
+        return false;
+    }
+
+    if (!is_file($zipTemporal)) {
+        @unlink($zipTemporal);
+        return false;
+    }
+
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+
+    ignore_user_abort(true);
+    register_shutdown_function(function($archivo) {
+        if (is_file($archivo)) {
+            @unlink($archivo);
+        }
+    }, $zipTemporal);
+
+    header("Content-Type: application/zip");
+    header("Content-Disposition: attachment; filename=\"" . $nombreDescarga . "\"");
+    header("Content-Length: " . filesize($zipTemporal));
+    header("Cache-Control: no-store, no-cache, must-revalidate");
+    header("Pragma: no-cache");
+    readfile($zipTemporal);
+    @unlink($zipTemporal);
+    exit;
+}
+
 function acuerdoDefault() {
     return [
         "monto_total" => 0,
@@ -184,6 +261,13 @@ button{background:#087a46;color:white;border:0;font-weight:bold;cursor:pointer}
 </body>
 </html>
 <?php exit; }
+
+$backupError = "";
+if (isset($_GET["backup"])) {
+    if (!enviarBackupManual($empresasFile, $pagosFile, $uploadDir)) {
+        $backupError = "No fue posible generar el backup.";
+    }
+}
 
 $empresas = leerJson($empresasFile);
 $pagos = leerJson($pagosFile);
@@ -480,6 +564,7 @@ body{margin:0;font-family:Arial;background:#f3f6f4;color:#222}
 header{background:#087a46;color:white;padding:18px 25px;display:flex;justify-content:space-between;align-items:center}
 header h1{margin:0;font-size:24px}
 header a{color:white;text-decoration:none;font-weight:bold}
+.header-actions{display:flex;gap:12px;align-items:center}
 main{padding:20px}
 .tabs{display:flex;flex-wrap:wrap;gap:8px;background:white;padding:12px 20px;border-bottom:1px solid #dcefe6;position:sticky;top:0;z-index:5}
 .tab-btn{width:auto;background:#eaf7f0;color:#087a46;border:1px solid #b9dfcc;padding:10px 13px}
@@ -550,7 +635,10 @@ th{background:#087a46;color:white}
 
 <header>
 <h1>Registro de Pagos - Empresas Deudoras</h1>
+<div class="header-actions">
+<a href="?backup=1">&#x2B07; Backup</a>
 <a href="?logout=1">Salir</a>
+</div>
 </header>
 
 <nav class="tabs">
@@ -564,6 +652,9 @@ th{background:#087a46;color:white}
 </nav>
 
 <main>
+<?php if ($backupError !== ""): ?>
+<p class="error"><?= e($backupError) ?></p>
+<?php endif; ?>
 
 <section class="tab-panel active" id="tab-inicio">
 <div class="card resumen">
