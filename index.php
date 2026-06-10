@@ -557,6 +557,7 @@ $coincidenciasEmpresa = ["cuit" => null, "exacta" => null, "parecidas" => []];
 $advertenciaEmpresa = false;
 $errorPago = "";
 $errorRecaudacion = "";
+$errorEmpresaRecaudacion = "";
 
 if (isset($_GET["auditoria"]) && !$esAdmin) {
     accesoDenegado();
@@ -675,6 +676,44 @@ if (isset($_GET["exportar"]) && $_GET["exportar"] === "recaudacion") {
         ["Empresa", "CUIT", "Periodo", "Fecha transferencia", "Banco", "Cuenta acreditacion", "Monto sindicato", "Monto mutual", "Total", "Observaciones", "Usuario"],
         $filas
     );
+}
+
+if (isset($_POST["guardar_empresa_recaudacion"])) {
+    $empresaIdEditar = trim($_POST["empresa_recaudacion_id"] ?? "");
+    $razonEditar = trim($_POST["empresa_recaudacion_razon"] ?? "");
+    $cuitEditar = trim($_POST["empresa_recaudacion_cuit"] ?? "");
+    $empresaEditada = buscarEmpresa($recaudacionEmpresas, $empresaIdEditar);
+
+    if (!$empresaEditada) {
+        $errorEmpresaRecaudacion = "No se encontró la empresa de recaudación.";
+    } elseif ($razonEditar === "") {
+        $errorEmpresaRecaudacion = "La razón social es obligatoria.";
+    }
+
+    if ($errorEmpresaRecaudacion === "") {
+        foreach ($recaudacionEmpresas as $indice => $empresaRecaudacion) {
+            if (($empresaRecaudacion["id"] ?? "") !== $empresaIdEditar) continue;
+            $recaudacionEmpresas[$indice]["razon"] = $razonEditar;
+            $recaudacionEmpresas[$indice]["cuit"] = $cuitEditar;
+            break;
+        }
+
+        foreach ($recaudacionPagos as $indice => $movimiento) {
+            if (($movimiento["empresa_id"] ?? "") !== $empresaIdEditar) continue;
+            $recaudacionPagos[$indice]["empresa"] = $razonEditar;
+            $recaudacionPagos[$indice]["cuit"] = $cuitEditar;
+        }
+
+        guardarJson($recaudacionEmpresasFile, $recaudacionEmpresas);
+        guardarJson($recaudacionPagosFile, $recaudacionPagos);
+        registrarAuditoria(
+            $recaudacionAuditoriaFile,
+            "editar_empresa_recaudacion",
+            "Editó empresa de recaudación " . $razonEditar . ($cuitEditar !== "" ? " - CUIT " . $cuitEditar : "")
+        );
+        header("Location: index.php#recaudacion");
+        exit;
+    }
 }
 
 if (isset($_POST["guardar_recaudacion"])) {
@@ -1108,6 +1147,39 @@ if (isset($_GET["eliminar_recaudacion"])) {
     exit;
 }
 
+if (isset($_GET["eliminar_empresa_recaudacion"])) {
+    $id = trim($_GET["eliminar_empresa_recaudacion"] ?? "");
+    $empresaEliminada = buscarEmpresa($recaudacionEmpresas, $id);
+    $movimientosAsociados = array_values(array_filter(
+        $recaudacionPagos,
+        fn($movimiento) => ($movimiento["empresa_id"] ?? "") === $id
+    ));
+    $puedeEliminar = empty($movimientosAsociados) || ($_GET["eliminar_todo"] ?? "") === "1";
+
+    if ($empresaEliminada && $puedeEliminar) {
+        $recaudacionEmpresas = array_values(array_filter(
+            $recaudacionEmpresas,
+            fn($empresa) => ($empresa["id"] ?? "") !== $id
+        ));
+        if (!empty($movimientosAsociados)) {
+            $recaudacionPagos = array_values(array_filter(
+                $recaudacionPagos,
+                fn($movimiento) => ($movimiento["empresa_id"] ?? "") !== $id
+            ));
+            guardarJson($recaudacionPagosFile, $recaudacionPagos);
+        }
+        guardarJson($recaudacionEmpresasFile, $recaudacionEmpresas);
+        registrarAuditoria(
+            $recaudacionAuditoriaFile,
+            "eliminar_empresa_recaudacion",
+            "Eliminó empresa de recaudación " . detalleEmpresa($empresaEliminada)
+                . (!empty($movimientosAsociados) ? " junto con " . count($movimientosAsociados) . " movimientos asociados" : "")
+        );
+    }
+    header("Location: index.php#recaudacion");
+    exit;
+}
+
 $editarEmpresa = null;
 if (isset($_GET["editar_empresa"])) {
     $editarEmpresa = buscarEmpresa($empresas, $_GET["editar_empresa"]);
@@ -1189,6 +1261,18 @@ if ($errorRecaudacion !== "" && isset($_POST["guardar_recaudacion"])) {
     ];
 }
 
+$editarEmpresaRecaudacion = null;
+if (isset($_GET["editar_empresa_recaudacion"])) {
+    $editarEmpresaRecaudacion = buscarEmpresa($recaudacionEmpresas, $_GET["editar_empresa_recaudacion"]);
+}
+if ($errorEmpresaRecaudacion !== "" && isset($_POST["guardar_empresa_recaudacion"])) {
+    $editarEmpresaRecaudacion = [
+        "id" => $_POST["empresa_recaudacion_id"] ?? "",
+        "razon" => $_POST["empresa_recaudacion_razon"] ?? "",
+        "cuit" => $_POST["empresa_recaudacion_cuit"] ?? ""
+    ];
+}
+
 $totalCobrado = 0;
 $cobradoOS = 0;
 $cobradoSindicato = 0;
@@ -1239,7 +1323,7 @@ foreach ($empresas as $empresa) {
         }
     }
 }
-$tabInicial = ($editarRecaudacion || $errorRecaudacion !== "")
+$tabInicial = ($editarRecaudacion || $errorRecaudacion !== "" || $editarEmpresaRecaudacion || $errorEmpresaRecaudacion !== "")
     ? "recaudacion"
     : ($editarPago ? "cargar-pago" : ($editarEmpresa ? "nueva-empresa" : ((isset($_POST["guardar_acuerdo"]) && $errorEmpresa !== "") ? "cargar-acuerdo" : "inicio")));
 ?>
@@ -1304,6 +1388,7 @@ button{background:#087a46;color:white;border:0;font-weight:bold;cursor:pointer}
 .btn-cancelar{display:inline-block;background:#777;color:white;padding:10px 14px;border-radius:8px;text-decoration:none;margin-left:8px}
 .btn-secundario{display:inline-block;background:#eaf7f0;color:#087a46;border:1px solid #b9dfcc;padding:9px 12px;border-radius:8px;text-decoration:none;font-weight:bold;margin-right:8px}
 .btn-danger{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;background:#b00020;color:white;border:0;padding:0;border-radius:8px;text-decoration:none;font-size:16px;line-height:1;vertical-align:middle}
+.btn-danger-text{width:auto;height:auto;min-height:32px;padding:7px 10px;font-size:14px}
 .btn-danger:hover{background:#8f001a}
 button,
 .btn-cancelar,
@@ -1353,6 +1438,7 @@ textarea:focus-visible{
 .filters-grid.informe{grid-template-columns:1fr 1fr auto auto}
 .filters-grid.auditoria{grid-template-columns:1fr 1.2fr 2fr 1fr 1fr auto auto}
 .filters-grid.recaudacion{grid-template-columns:2fr 1fr 1fr 1fr 1fr auto}
+.filters-grid.empresas-recaudacion{grid-template-columns:1fr auto}
 .recaudacion-card{border-left:6px solid #38a169;background:linear-gradient(90deg,#f1fbf5 0,#fff 180px)}
 .recaudacion-card h2,.recaudacion-card h3{color:#086b43}
 .recaudacion-intro{background:#def5e8;border:1px solid #a8dcbc;border-radius:12px;padding:12px 14px;margin-bottom:16px;color:#22543d}
@@ -1360,6 +1446,10 @@ textarea:focus-visible{
 .recaudacion-resumen .box{background:#def5e8}
 .recaudacion-tab{background:#def5e8;border-color:#82c99f}
 .recaudacion-tab.active{background:#22543d;border-color:#22543d}
+.dialogo-recaudacion{border:0;border-radius:16px;box-shadow:0 12px 35px #0004;max-width:520px;padding:24px}
+.dialogo-recaudacion::backdrop{background:#0007}
+.dialogo-acciones{display:flex;justify-content:flex-end;gap:10px;margin-top:18px}
+.dialogo-acciones button,.dialogo-acciones a{width:auto;height:auto;margin:0;padding:10px 14px}
 .filters input,.filters select{width:100%;background:white}
 .filters button{white-space:nowrap}
 .informe-resumen{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:12px 0 16px}
@@ -1394,7 +1484,7 @@ th{background:#087a46;color:white}
 .empresa-coincidencia:first-of-type{border-top:0}
 .empresa-coincidencia button{width:auto;white-space:nowrap}
 .fila-oculta{display:none}
-@media(max-width:1000px){.grid,.resumen,.home-actions,.empresa-ficha-grid,.filters-grid,.filters-grid.empresas,.filters-grid.informe,.filters-grid.auditoria,.filters-grid.recaudacion,.informe-resumen,.resumen-acuerdo-grid,.recaudacion-resumen{grid-template-columns:1fr}table{display:block;overflow-x:auto}}
+@media(max-width:1000px){.grid,.resumen,.home-actions,.empresa-ficha-grid,.filters-grid,.filters-grid.empresas,.filters-grid.informe,.filters-grid.auditoria,.filters-grid.recaudacion,.filters-grid.empresas-recaudacion,.informe-resumen,.resumen-acuerdo-grid,.recaudacion-resumen{grid-template-columns:1fr}table{display:block;overflow-x:auto}}
 </style>
 </head>
 <body>
@@ -2017,6 +2107,80 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 Este módulo registra transferencias acreditadas y funciona de manera independiente de pagos, deudas y acuerdos.
 </div>
 
+<div class="card recaudacion-card collapsible-card" id="empresas-recaudacion" data-card="empresas-recaudacion">
+<div class="card-header">
+<h2>Empresas</h2>
+<button type="button" class="toggle-card">Minimizar</button>
+</div>
+<div class="card-body">
+<?php if ($editarEmpresaRecaudacion): ?>
+<form method="post" style="margin-bottom:20px">
+<input type="hidden" name="empresa_recaudacion_id" value="<?= e($editarEmpresaRecaudacion["id"] ?? "") ?>">
+<div class="grid">
+<div class="campo">
+<label for="empresaRecaudacionRazon">Razón Social</label>
+<input type="text" id="empresaRecaudacionRazon" name="empresa_recaudacion_razon" required value="<?= e($editarEmpresaRecaudacion["razon"] ?? "") ?>">
+</div>
+<div class="campo">
+<label for="empresaRecaudacionCuit">CUIT</label>
+<input type="text" id="empresaRecaudacionCuit" name="empresa_recaudacion_cuit" value="<?= e($editarEmpresaRecaudacion["cuit"] ?? "") ?>">
+</div>
+</div>
+<?php if ($errorEmpresaRecaudacion !== ""): ?>
+<p class="error"><?= e($errorEmpresaRecaudacion) ?></p>
+<?php endif; ?>
+<button type="submit" name="guardar_empresa_recaudacion">Guardar cambios</button>
+<a class="btn-cancelar" href="index.php#recaudacion">Cancelar</a>
+</form>
+<?php endif; ?>
+
+<div class="filters">
+<div class="filters-grid empresas-recaudacion">
+<input type="text" id="filtroEmpresasRecaudacion" placeholder="Buscar por nombre o CUIT">
+<button type="button" id="limpiarEmpresasRecaudacion">Limpiar filtro</button>
+</div>
+</div>
+<table>
+<thead>
+<tr><th>Empresa</th><th>CUIT</th><th>Cantidad de movimientos</th><th>Acciones</th></tr>
+</thead>
+<tbody>
+<?php if (empty($recaudacionEmpresas)): ?>
+<tr><td colspan="4" class="sin">Todavía no hay empresas propias de recaudación.</td></tr>
+<?php endif; ?>
+<?php foreach ($recaudacionEmpresas as $empresaRecaudacion):
+$cantidadMovimientosEmpresa = count(array_filter(
+    $recaudacionPagos,
+    fn($movimiento) => ($movimiento["empresa_id"] ?? "") === ($empresaRecaudacion["id"] ?? "")
+));
+?>
+<tr class="fila-empresa-recaudacion" data-busqueda="<?= e(($empresaRecaudacion["razon"] ?? "") . " " . ($empresaRecaudacion["cuit"] ?? "")) ?>">
+<td><?= e($empresaRecaudacion["razon"] ?? "") ?></td>
+<td><?= e($empresaRecaudacion["cuit"] ?? "") ?></td>
+<td><?= e($cantidadMovimientosEmpresa) ?></td>
+<td class="acciones">
+<a href="?editar_empresa_recaudacion=<?= e($empresaRecaudacion["id"] ?? "") ?>#recaudacion" title="Editar empresa">✏️ Editar</a>
+<?php if ($cantidadMovimientosEmpresa > 0): ?>
+<a class="btn-danger btn-danger-text eliminar-empresa-recaudacion-con-movimientos"
+   href="?eliminar_empresa_recaudacion=<?= e($empresaRecaudacion["id"] ?? "") ?>&amp;eliminar_todo=1"
+   title="Eliminar empresa"
+   aria-label="Eliminar empresa">🗑 Eliminar</a>
+<?php else: ?>
+<a class="btn-danger btn-danger-text"
+   href="?eliminar_empresa_recaudacion=<?= e($empresaRecaudacion["id"] ?? "") ?>"
+   onclick="return confirm('¿Eliminar esta empresa de recaudación?')"
+   title="Eliminar empresa"
+   aria-label="Eliminar empresa">🗑 Eliminar</a>
+<?php endif; ?>
+</td>
+</tr>
+<?php endforeach; ?>
+<tr id="empresasRecaudacionSinResultados" class="fila-oculta"><td colspan="4" class="sin">No se encontraron empresas.</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
 <div class="card recaudacion-card collapsible-card" id="cargar-recaudacion" data-card="cargar-recaudacion">
 <div class="card-header">
 <h2><?= $editarRecaudacion ? "Editar recaudación" : "Cargar recaudación" ?></h2>
@@ -2124,8 +2288,8 @@ Este módulo registra transferencias acreditadas y funciona de manera independie
 <td><?= e($movimiento["observaciones"] ?? "") ?></td>
 <td><?= e($movimiento["usuario"] ?? "") ?></td>
 <td class="acciones">
-<a href="?editar_recaudacion=<?= e($movimiento["id"] ?? "") ?>#recaudacion" title="Editar recaudación">Editar</a>
-<a class="btn-danger" href="?eliminar_recaudacion=<?= e($movimiento["id"] ?? "") ?>" onclick="return confirm('¿Eliminar este movimiento de recaudación?')" title="Eliminar recaudación" aria-label="Eliminar recaudación">X</a>
+<a href="?editar_recaudacion=<?= e($movimiento["id"] ?? "") ?>#recaudacion" title="Editar recaudación">✏️ Editar</a>
+<a class="btn-danger btn-danger-text" href="?eliminar_recaudacion=<?= e($movimiento["id"] ?? "") ?>" onclick="return confirm('¿Eliminar este movimiento de recaudación?')" title="Eliminar recaudación" aria-label="Eliminar recaudación">🗑 Eliminar</a>
 </td>
 </tr>
 <?php endforeach; ?>
@@ -2158,6 +2322,15 @@ Este módulo registra transferencias acreditadas y funciona de manera independie
 </div>
 </div>
 </section>
+
+<dialog class="dialogo-recaudacion" id="dialogoEliminarEmpresaRecaudacion">
+<h3>Eliminar empresa</h3>
+<p>Esta empresa tiene movimientos registrados. ¿Desea eliminar también todos los movimientos asociados?</p>
+<div class="dialogo-acciones">
+<button type="button" class="btn-cancelar" id="cancelarEliminarEmpresaRecaudacion">Cancelar</button>
+<a class="btn-danger btn-danger-text" id="confirmarEliminarEmpresaRecaudacion" href="#">Eliminar todo</a>
+</div>
+</dialog>
 
 <?php if ($esAdmin): ?>
 <section class="tab-panel" id="tab-auditoria">
@@ -3720,6 +3893,46 @@ function configurarRecaudacion() {
                 event.preventDefault();
                 alert("Al menos uno de los montos debe ser mayor a 0.");
             }
+        });
+    }
+
+    const filtroEmpresas = document.getElementById("filtroEmpresasRecaudacion");
+    const limpiarEmpresas = document.getElementById("limpiarEmpresasRecaudacion");
+    const empresasSinResultados = document.getElementById("empresasRecaudacionSinResultados");
+    const filasEmpresas = Array.from(document.querySelectorAll(".fila-empresa-recaudacion"));
+    if (filtroEmpresas && limpiarEmpresas) {
+        const aplicarFiltroEmpresas = () => {
+            let visibles = 0;
+            filasEmpresas.forEach((fila) => {
+                const visible = coincideBusqueda(fila.dataset.busqueda || "", filtroEmpresas.value);
+                fila.classList.toggle("fila-oculta", !visible);
+                if (visible) visibles++;
+            });
+            if (empresasSinResultados) {
+                empresasSinResultados.classList.toggle("fila-oculta", filasEmpresas.length === 0 || visibles > 0);
+            }
+        };
+        filtroEmpresas.addEventListener("input", aplicarFiltroEmpresas);
+        limpiarEmpresas.addEventListener("click", () => {
+            filtroEmpresas.value = "";
+            aplicarFiltroEmpresas();
+        });
+    }
+
+    const dialogoEliminarEmpresa = document.getElementById("dialogoEliminarEmpresaRecaudacion");
+    const cancelarEliminarEmpresa = document.getElementById("cancelarEliminarEmpresaRecaudacion");
+    const confirmarEliminarEmpresa = document.getElementById("confirmarEliminarEmpresaRecaudacion");
+    if (dialogoEliminarEmpresa && cancelarEliminarEmpresa && confirmarEliminarEmpresa) {
+        document.querySelectorAll(".eliminar-empresa-recaudacion-con-movimientos").forEach((enlace) => {
+            enlace.addEventListener("click", (event) => {
+                event.preventDefault();
+                confirmarEliminarEmpresa.href = enlace.href;
+                dialogoEliminarEmpresa.showModal();
+            });
+        });
+        cancelarEliminarEmpresa.addEventListener("click", () => dialogoEliminarEmpresa.close());
+        dialogoEliminarEmpresa.addEventListener("click", (event) => {
+            if (event.target === dialogoEliminarEmpresa) dialogoEliminarEmpresa.close();
         });
     }
 
