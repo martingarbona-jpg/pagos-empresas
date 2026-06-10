@@ -19,6 +19,7 @@ $recaudacionDir = $dataDir . "/recaudacion";
 $recaudacionEmpresasFile = $recaudacionDir . "/empresas.json";
 $recaudacionPagosFile = $recaudacionDir . "/pagos.json";
 $recaudacionAuditoriaFile = $recaudacionDir . "/auditoria.json";
+$recaudacionObservadasFile = $recaudacionDir . "/observadas.json";
 
 if (!is_dir($dataDir)) mkdir($dataDir, 0755, true);
 if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
@@ -30,6 +31,7 @@ if (!file_exists($papeleraPagosFile)) file_put_contents($papeleraPagosFile, "[]"
 if (!file_exists($recaudacionEmpresasFile)) file_put_contents($recaudacionEmpresasFile, "[]");
 if (!file_exists($recaudacionPagosFile)) file_put_contents($recaudacionPagosFile, "[]");
 if (!file_exists($recaudacionAuditoriaFile)) file_put_contents($recaudacionAuditoriaFile, "[]");
+if (!file_exists($recaudacionObservadasFile)) file_put_contents($recaudacionObservadasFile, "[]");
 
 function e($v) {
     return htmlspecialchars($v ?? "", ENT_QUOTES, "UTF-8");
@@ -182,6 +184,47 @@ function detalleRecaudacion($movimiento) {
     return ($movimiento["empresa"] ?? "Empresa")
         . " - " . ($movimiento["periodo"] ?? "")
         . " - " . dinero($movimiento["total"] ?? 0);
+}
+
+function campoObservada($observada, $nombres, $default = "") {
+    foreach ($nombres as $nombre) {
+        if (array_key_exists($nombre, $observada)) return $observada[$nombre];
+    }
+    return $default;
+}
+
+function idObservada($observada) {
+    $id = trim((string)campoObservada($observada, ["id", "observada_id"], ""));
+    return $id !== "" ? $id : "obs_" . substr(sha1(json_encode($observada, JSON_UNESCAPED_UNICODE)), 0, 20);
+}
+
+function buscarObservada($observadas, $id) {
+    foreach ($observadas as $observada) {
+        if (idObservada($observada) === $id) return $observada;
+    }
+    return null;
+}
+
+function numeroObservada($valor) {
+    if (is_int($valor) || is_float($valor)) return floatval($valor);
+    $texto = trim((string)$valor);
+    if ($texto === "") return 0;
+    $texto = preg_replace('/[^\d,.\-]/', '', $texto);
+    if (strpos($texto, ",") !== false) {
+        $texto = str_replace(".", "", $texto);
+        $texto = str_replace(",", ".", $texto);
+    }
+    return floatval($texto);
+}
+
+function fechaObservadaParaInput($fecha) {
+    $fecha = trim((string)$fecha);
+    if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $fecha)) return $fecha;
+    foreach (["d/m/Y", "d/m/y", "d-m-Y", "d-m-y"] as $formato) {
+        $objeto = DateTime::createFromFormat($formato, $fecha);
+        if ($objeto && $objeto->format($formato) === $fecha) return $objeto->format("Y-m-d");
+    }
+    return "";
 }
 
 function formaSocietariaEmpresa($razon) {
@@ -552,12 +595,14 @@ $papeleraPagos = leerJson($papeleraPagosFile);
 $recaudacionEmpresas = leerJson($recaudacionEmpresasFile);
 $recaudacionPagos = leerJson($recaudacionPagosFile);
 $recaudacionAuditoria = leerJson($recaudacionAuditoriaFile);
+$recaudacionObservadas = leerJson($recaudacionObservadasFile);
 $errorEmpresa = "";
 $coincidenciasEmpresa = ["cuit" => null, "exacta" => null, "parecidas" => []];
 $advertenciaEmpresa = false;
 $errorPago = "";
 $errorRecaudacion = "";
 $errorEmpresaRecaudacion = "";
+$errorObservadaRecaudacion = "";
 
 if (isset($_GET["auditoria"]) && !$esAdmin) {
     accesoDenegado();
@@ -712,6 +757,93 @@ if (isset($_POST["guardar_empresa_recaudacion"])) {
             "Editó empresa de recaudación " . $razonEditar . ($cuitEditar !== "" ? " - CUIT " . $cuitEditar : "")
         );
         header("Location: index.php#recaudacion");
+        exit;
+    }
+}
+
+if (isset($_POST["importar_observada_recaudacion"])) {
+    $observadaId = trim($_POST["observada_id"] ?? "");
+    $observadaOriginal = buscarObservada($recaudacionObservadas, $observadaId);
+    $empresaIdObservada = trim($_POST["observada_empresa_id"] ?? "");
+    $empresaObservada = trim($_POST["observada_empresa"] ?? "");
+    $cuitObservada = trim($_POST["observada_cuit"] ?? "");
+    $periodoObservada = trim($_POST["observada_periodo"] ?? "");
+    $fechaObservada = trim($_POST["observada_fecha_transferencia"] ?? "");
+    $montoSindicatoObservada = floatval($_POST["observada_monto_sindicato"] ?? 0);
+    $montoMutualObservada = floatval($_POST["observada_monto_mutual"] ?? 0);
+
+    if (!$observadaOriginal) {
+        $errorObservadaRecaudacion = "No se encontró la observación seleccionada.";
+    } elseif ($empresaObservada === "") {
+        $errorObservadaRecaudacion = "La empresa es obligatoria.";
+    } elseif (!periodoValido($periodoObservada)) {
+        $errorObservadaRecaudacion = "El período debe tener formato MM/AA.";
+    } elseif ($fechaObservada === "") {
+        $errorObservadaRecaudacion = "La fecha de transferencia es obligatoria.";
+    } elseif ($montoSindicatoObservada < 0 || $montoMutualObservada < 0) {
+        $errorObservadaRecaudacion = "Los montos no pueden ser negativos.";
+    } elseif ($montoSindicatoObservada <= 0 && $montoMutualObservada <= 0) {
+        $errorObservadaRecaudacion = "Al menos uno de los montos debe ser mayor a 0.";
+    }
+
+    if ($errorObservadaRecaudacion === "") {
+        $empresaSeleccionada = $empresaIdObservada !== "" ? buscarEmpresa($empresas, $empresaIdObservada) : null;
+        if (!$empresaSeleccionada && $empresaIdObservada !== "") {
+            $empresaSeleccionada = buscarEmpresa($recaudacionEmpresas, $empresaIdObservada);
+        }
+        if (!$empresaSeleccionada) $empresaSeleccionada = buscarEmpresaPorRazon($empresas, $empresaObservada);
+        if (!$empresaSeleccionada) $empresaSeleccionada = buscarEmpresaPorRazon($recaudacionEmpresas, $empresaObservada);
+
+        if ($empresaSeleccionada) {
+            $empresaIdObservada = $empresaSeleccionada["id"] ?? "";
+            $empresaObservada = $empresaSeleccionada["razon"] ?? $empresaObservada;
+            if ($cuitObservada === "") $cuitObservada = $empresaSeleccionada["cuit"] ?? "";
+        } else {
+            $empresaIdObservada = uniqid("emp_rec_");
+            $empresaSeleccionada = [
+                "id" => $empresaIdObservada,
+                "razon" => $empresaObservada,
+                "cuit" => $cuitObservada,
+                "fecha_carga" => date("Y-m-d H:i:s")
+            ];
+            $recaudacionEmpresas[] = $empresaSeleccionada;
+            guardarJson($recaudacionEmpresasFile, $recaudacionEmpresas);
+            registrarAuditoria(
+                $recaudacionAuditoriaFile,
+                "crear_empresa_recaudacion",
+                "Creó empresa de recaudación al importar observada " . detalleEmpresa($empresaSeleccionada)
+            );
+        }
+
+        $movimientoImportado = [
+            "id" => uniqid("rec_"),
+            "empresa_id" => $empresaIdObservada,
+            "empresa" => $empresaObservada,
+            "cuit" => $cuitObservada,
+            "periodo" => $periodoObservada,
+            "fecha_transferencia" => $fechaObservada,
+            "banco" => trim($_POST["observada_banco"] ?? ""),
+            "cuenta_acreditacion" => trim($_POST["observada_cuenta_acreditacion"] ?? ""),
+            "monto_sindicato" => $montoSindicatoObservada,
+            "monto_mutual" => $montoMutualObservada,
+            "total" => $montoSindicatoObservada + $montoMutualObservada,
+            "observaciones" => trim($_POST["observada_observaciones"] ?? ""),
+            "fecha_carga" => date("Y-m-d H:i:s"),
+            "usuario" => usuarioActual()
+        ];
+        $recaudacionPagos[] = $movimientoImportado;
+        $recaudacionObservadas = array_values(array_filter(
+            $recaudacionObservadas,
+            fn($observada) => idObservada($observada) !== $observadaId
+        ));
+        guardarJson($recaudacionPagosFile, $recaudacionPagos);
+        guardarJson($recaudacionObservadasFile, $recaudacionObservadas);
+        registrarAuditoria(
+            $recaudacionAuditoriaFile,
+            "importar_observada_recaudacion",
+            "Importó observación como recaudación " . detalleRecaudacion($movimientoImportado)
+        );
+        header("Location: index.php?recaudacion_subtab=observadas#recaudacion");
         exit;
     }
 }
@@ -1147,6 +1279,26 @@ if (isset($_GET["eliminar_recaudacion"])) {
     exit;
 }
 
+if (isset($_GET["descartar_observada_recaudacion"])) {
+    $id = trim($_GET["descartar_observada_recaudacion"] ?? "");
+    $observadaDescartada = buscarObservada($recaudacionObservadas, $id);
+    if ($observadaDescartada) {
+        $recaudacionObservadas = array_values(array_filter(
+            $recaudacionObservadas,
+            fn($observada) => idObservada($observada) !== $id
+        ));
+        guardarJson($recaudacionObservadasFile, $recaudacionObservadas);
+        registrarAuditoria(
+            $recaudacionAuditoriaFile,
+            "descartar_observada_recaudacion",
+            "Descartó observación de recaudación "
+                . campoObservada($observadaDescartada, ["empresa", "empresa_excel", "razon", "razon_social"], "Empresa sin identificar")
+        );
+    }
+    header("Location: index.php?recaudacion_subtab=observadas#recaudacion");
+    exit;
+}
+
 if (isset($_GET["eliminar_empresa_recaudacion"])) {
     $id = trim($_GET["eliminar_empresa_recaudacion"] ?? "");
     $empresaEliminada = buscarEmpresa($recaudacionEmpresas, $id);
@@ -1273,6 +1425,41 @@ if ($errorEmpresaRecaudacion !== "" && isset($_POST["guardar_empresa_recaudacion
     ];
 }
 
+$editarObservadaRecaudacion = null;
+if (isset($_GET["editar_observada_recaudacion"])) {
+    $observada = buscarObservada($recaudacionObservadas, $_GET["editar_observada_recaudacion"]);
+    if ($observada) {
+        $editarObservadaRecaudacion = [
+            "id" => idObservada($observada),
+            "empresa_id" => campoObservada($observada, ["empresa_id"], ""),
+            "empresa" => campoObservada($observada, ["empresa", "empresa_excel", "razon", "razon_social"], ""),
+            "cuit" => campoObservada($observada, ["cuit", "CUIT"], ""),
+            "periodo" => periodoParaInput(campoObservada($observada, ["periodo", "periodo_original"], "")),
+            "fecha_transferencia" => fechaObservadaParaInput(campoObservada($observada, ["fecha_transferencia", "fecha", "fecha_original"], "")),
+            "banco" => campoObservada($observada, ["banco"], ""),
+            "cuenta_acreditacion" => campoObservada($observada, ["cuenta_acreditacion", "cuenta"], ""),
+            "monto_sindicato" => numeroObservada(campoObservada($observada, ["monto_sindicato", "sindicato"], 0)),
+            "monto_mutual" => numeroObservada(campoObservada($observada, ["monto_mutual", "mutual"], 0)),
+            "observaciones" => campoObservada($observada, ["observaciones"], "")
+        ];
+    }
+}
+if ($errorObservadaRecaudacion !== "" && isset($_POST["importar_observada_recaudacion"])) {
+    $editarObservadaRecaudacion = [
+        "id" => $_POST["observada_id"] ?? "",
+        "empresa_id" => $_POST["observada_empresa_id"] ?? "",
+        "empresa" => $_POST["observada_empresa"] ?? "",
+        "cuit" => $_POST["observada_cuit"] ?? "",
+        "periodo" => $_POST["observada_periodo"] ?? "",
+        "fecha_transferencia" => $_POST["observada_fecha_transferencia"] ?? "",
+        "banco" => $_POST["observada_banco"] ?? "",
+        "cuenta_acreditacion" => $_POST["observada_cuenta_acreditacion"] ?? "",
+        "monto_sindicato" => $_POST["observada_monto_sindicato"] ?? "",
+        "monto_mutual" => $_POST["observada_monto_mutual"] ?? "",
+        "observaciones" => $_POST["observada_observaciones"] ?? ""
+    ];
+}
+
 $totalCobrado = 0;
 $cobradoOS = 0;
 $cobradoSindicato = 0;
@@ -1323,7 +1510,7 @@ foreach ($empresas as $empresa) {
         }
     }
 }
-$tabInicial = ($editarRecaudacion || $errorRecaudacion !== "" || $editarEmpresaRecaudacion || $errorEmpresaRecaudacion !== "")
+$tabInicial = ($editarRecaudacion || $errorRecaudacion !== "" || $editarEmpresaRecaudacion || $errorEmpresaRecaudacion !== "" || $editarObservadaRecaudacion || $errorObservadaRecaudacion !== "")
     ? "recaudacion"
     : ($editarPago ? "cargar-pago" : ($editarEmpresa ? "nueva-empresa" : ((isset($_POST["guardar_acuerdo"]) && $errorEmpresa !== "") ? "cargar-acuerdo" : "inicio")));
 ?>
@@ -1444,8 +1631,9 @@ textarea:focus-visible{
 .recaudacion-intro{background:#def5e8;border:1px solid #a8dcbc;border-radius:12px;padding:12px 14px;margin-bottom:16px;color:#22543d}
 .recaudacion-resumen{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:14px 0}
 .recaudacion-resumen .box{background:#def5e8}
-.recaudacion-tab{background:#def5e8;border-color:#82c99f}
-.recaudacion-tab.active{background:#22543d;border-color:#22543d}
+.tab-btn.recaudacion-tab{background:#E0F2FE;color:#0369A1;border-color:#38BDF8}
+.tab-btn.recaudacion-tab:hover{background:#7DD3FC}
+.tab-btn.recaudacion-tab.active{background:#0EA5E9;color:#FFFFFF;border-color:#38BDF8}
 .recaudacion-subtabs{display:flex;flex-wrap:wrap;gap:8px;background:#f1fbf5;border:1px solid #a8dcbc;border-radius:12px;padding:8px;margin-bottom:18px}
 .recaudacion-subtab{width:auto;background:transparent;color:#086b43;border:1px solid transparent;padding:9px 14px}
 .recaudacion-subtab:hover{background:#def5e8}
@@ -2114,11 +2302,16 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 Este módulo registra transferencias acreditadas y funciona de manera independiente de pagos, deudas y acuerdos.
 </div>
 
-<div class="recaudacion-subtabs" id="recaudacionSubtabs" data-inicial="<?= $editarEmpresaRecaudacion ? "empresas" : "cargar" ?>">
+<div class="recaudacion-subtabs" id="recaudacionSubtabs" data-inicial="<?= e(
+    $editarObservadaRecaudacion || ($_GET["recaudacion_subtab"] ?? "") === "observadas"
+        ? "observadas"
+        : ($editarEmpresaRecaudacion ? "empresas" : "cargar")
+) ?>">
 <button type="button" class="recaudacion-subtab active" data-recaudacion-subtab="cargar">Cargar recaudación</button>
 <button type="button" class="recaudacion-subtab" data-recaudacion-subtab="empresas">Empresas</button>
 <button type="button" class="recaudacion-subtab" data-recaudacion-subtab="historial">Historial</button>
 <button type="button" class="recaudacion-subtab" data-recaudacion-subtab="informe">Informe</button>
+<button type="button" class="recaudacion-subtab" data-recaudacion-subtab="observadas">Observadas (<?= e(count($recaudacionObservadas)) ?>)</button>
 </div>
 
 <div class="card recaudacion-card recaudacion-subpanel" id="empresas-recaudacion" data-recaudacion-panel="empresas">
@@ -2329,6 +2522,121 @@ $cantidadMovimientosEmpresa = count(array_filter(
 <div class="box"><div class="label">Total general</div><div class="num" id="informeRecTotal">$0,00</div></div>
 <div class="box"><div class="label">Cantidad de movimientos</div><div class="num" id="informeRecCantidad">0</div></div>
 </div>
+</div>
+</div>
+
+<div class="card recaudacion-card recaudacion-subpanel" id="observadas-recaudacion" data-recaudacion-panel="observadas">
+<div class="card-header">
+<h2>Observadas (<?= e(count($recaudacionObservadas)) ?>)</h2>
+</div>
+<div class="card-body">
+<?php if ($editarObservadaRecaudacion): ?>
+<form method="post" id="observadaRecaudacionForm" style="margin-bottom:20px">
+<input type="hidden" name="observada_id" value="<?= e($editarObservadaRecaudacion["id"] ?? "") ?>">
+<input type="hidden" name="observada_empresa_id" id="observadaEmpresaId" value="<?= e($editarObservadaRecaudacion["empresa_id"] ?? "") ?>">
+<div class="grid">
+<div class="campo">
+<label for="observadaEmpresa">Empresa</label>
+<div class="empresa-picker">
+<input type="text" id="observadaEmpresa" name="observada_empresa" class="empresa-picker-input" autocomplete="off" required value="<?= e($editarObservadaRecaudacion["empresa"] ?? "") ?>">
+<div class="empresa-picker-results" id="observadaEmpresaResultados"></div>
+</div>
+</div>
+<div class="campo">
+<label for="observadaCuit">CUIT</label>
+<input type="text" id="observadaCuit" name="observada_cuit" value="<?= e($editarObservadaRecaudacion["cuit"] ?? "") ?>">
+</div>
+<div class="campo">
+<label for="observadaPeriodo">Período</label>
+<input type="text" id="observadaPeriodo" name="observada_periodo" class="periodo-input" maxlength="5" inputmode="numeric" placeholder="MM/AA" required value="<?= e($editarObservadaRecaudacion["periodo"] ?? "") ?>">
+</div>
+<div class="campo">
+<label for="observadaFecha">Fecha transferencia</label>
+<input type="date" id="observadaFecha" name="observada_fecha_transferencia" required value="<?= e($editarObservadaRecaudacion["fecha_transferencia"] ?? "") ?>">
+</div>
+<div class="campo">
+<label for="observadaBanco">Banco</label>
+<input type="text" id="observadaBanco" name="observada_banco" value="<?= e($editarObservadaRecaudacion["banco"] ?? "") ?>">
+</div>
+<div class="campo">
+<label for="observadaCuenta">Cuenta acreditación</label>
+<input type="text" id="observadaCuenta" name="observada_cuenta_acreditacion" value="<?= e($editarObservadaRecaudacion["cuenta_acreditacion"] ?? "") ?>">
+</div>
+<div class="campo">
+<label for="observadaSindicato">Monto sindicato</label>
+<input type="number" id="observadaSindicato" name="observada_monto_sindicato" min="0" step="0.01" value="<?= e($editarObservadaRecaudacion["monto_sindicato"] ?? "0") ?>">
+</div>
+<div class="campo">
+<label for="observadaMutual">Monto mutual</label>
+<input type="number" id="observadaMutual" name="observada_monto_mutual" min="0" step="0.01" value="<?= e($editarObservadaRecaudacion["monto_mutual"] ?? "0") ?>">
+</div>
+</div>
+<div class="campo" style="margin-top:12px">
+<label for="observadaObservaciones">Observaciones</label>
+<textarea id="observadaObservaciones" name="observada_observaciones"><?= e($editarObservadaRecaudacion["observaciones"] ?? "") ?></textarea>
+</div>
+<?php if ($errorObservadaRecaudacion !== ""): ?>
+<p class="error"><?= e($errorObservadaRecaudacion) ?></p>
+<?php endif; ?>
+<button type="submit" name="importar_observada_recaudacion">Guardar e importar</button>
+<a class="btn-cancelar" href="index.php?recaudacion_subtab=observadas#recaudacion">Cancelar</a>
+</form>
+<?php endif; ?>
+
+<div class="filters">
+<input type="text" id="filtroObservadasRecaudacion" placeholder="Buscar por empresa, CUIT, período, fecha, banco, cuenta o motivo">
+</div>
+<table>
+<thead>
+<tr>
+<th>Empresa Excel</th><th>CUIT</th><th>Período Original</th><th>Fecha Original</th><th>Banco</th>
+<th>Cuenta</th><th>Sindicato</th><th>Mutual</th><th>Total</th><th>Motivo</th><th>Acciones</th>
+</tr>
+</thead>
+<tbody>
+<?php if (empty($recaudacionObservadas)): ?>
+<tr><td colspan="11" class="sin">No hay registros observados.</td></tr>
+<?php endif; ?>
+<?php foreach (array_reverse($recaudacionObservadas) as $observada):
+$observadaIdFila = idObservada($observada);
+$observadaEmpresaFila = campoObservada($observada, ["empresa", "empresa_excel", "razon", "razon_social"], "");
+$observadaCuitFila = campoObservada($observada, ["cuit", "CUIT"], "");
+$observadaPeriodoFila = campoObservada($observada, ["periodo_original", "periodo"], "");
+$observadaFechaFila = campoObservada($observada, ["fecha_original", "fecha_transferencia", "fecha"], "");
+$observadaBancoFila = campoObservada($observada, ["banco"], "");
+$observadaCuentaFila = campoObservada($observada, ["cuenta", "cuenta_acreditacion"], "");
+$observadaSindicatoFila = numeroObservada(campoObservada($observada, ["sindicato", "monto_sindicato"], 0));
+$observadaMutualFila = numeroObservada(campoObservada($observada, ["mutual", "monto_mutual"], 0));
+$observadaTotalFila = numeroObservada(campoObservada($observada, ["total"], $observadaSindicatoFila + $observadaMutualFila));
+$observadaMotivoFila = campoObservada($observada, ["motivo", "error", "observacion"], "");
+$busquedaObservada = implode(" ", [
+    $observadaEmpresaFila, $observadaCuitFila, $observadaPeriodoFila, $observadaFechaFila,
+    $observadaBancoFila, $observadaCuentaFila, $observadaMotivoFila
+]);
+?>
+<tr class="fila-observada-recaudacion" data-busqueda="<?= e($busquedaObservada) ?>">
+<td><?= e($observadaEmpresaFila) ?></td>
+<td><?= e($observadaCuitFila) ?></td>
+<td><?= e($observadaPeriodoFila) ?></td>
+<td><?= e($observadaFechaFila) ?></td>
+<td><?= e($observadaBancoFila) ?></td>
+<td><?= e($observadaCuentaFila) ?></td>
+<td><?= dinero($observadaSindicatoFila) ?></td>
+<td><?= dinero($observadaMutualFila) ?></td>
+<td><?= dinero($observadaTotalFila) ?></td>
+<td><?= e($observadaMotivoFila) ?></td>
+<td class="acciones">
+<a href="?editar_observada_recaudacion=<?= e($observadaIdFila) ?>#recaudacion" title="Editar e importar">✏️ Editar e Importar</a>
+<a class="btn-danger btn-danger-text"
+   href="?descartar_observada_recaudacion=<?= e($observadaIdFila) ?>"
+   onclick="return confirm('¿Desea eliminar definitivamente esta observación?')"
+   title="Descartar observación">🗑 Descartar</a>
+</td>
+</tr>
+<?php endforeach; ?>
+<tr id="observadasRecaudacionSinResultados" class="fila-oculta"><td colspan="11" class="sin">No se encontraron observaciones.</td></tr>
+</tbody>
+</table>
 </div>
 </div>
 </section>
@@ -3907,6 +4215,41 @@ function configurarRecaudacion() {
         });
     }
 
+    const observadaEmpresaInput = document.getElementById("observadaEmpresa");
+    const observadaEmpresaIdInput = document.getElementById("observadaEmpresaId");
+    const observadaCuitInput = document.getElementById("observadaCuit");
+    const observadaResultados = document.getElementById("observadaEmpresaResultados");
+    if (observadaEmpresaInput && observadaEmpresaIdInput && observadaCuitInput && observadaResultados) {
+        observadaEmpresaInput.addEventListener("input", () => {
+            observadaEmpresaIdInput.value = "";
+            observadaCuitInput.value = "";
+            const texto = normalizarTexto(observadaEmpresaInput.value);
+            if (texto.length < 2) {
+                observadaResultados.innerHTML = "";
+                observadaResultados.classList.remove("active");
+                return;
+            }
+
+            const coincidencias = empresasRecaudacion
+                .filter((empresa) => coincideBusqueda((empresa.razon || "") + " " + (empresa.cuit || ""), texto))
+                .slice(0, 30);
+            observadaResultados.innerHTML = coincidencias.length
+                ? coincidencias.map((empresa) => `<div class="empresa-picker-option" data-id="${escapeHtml(empresa.id || "")}" data-razon="${escapeHtml(empresa.razon || "")}" data-cuit="${escapeHtml(empresa.cuit || "")}"><strong>${escapeHtml(empresa.razon || "")}</strong> - ${escapeHtml(empresa.cuit || "")}<br><small>${escapeHtml(empresa.origen)}</small></div>`).join("")
+                : '<div class="empresa-picker-option sin">Sin coincidencias. Se creará en el padrón de recaudación.</div>';
+            observadaResultados.classList.add("active");
+
+            observadaResultados.querySelectorAll(".empresa-picker-option[data-id]").forEach((opcion) => {
+                opcion.addEventListener("click", () => {
+                    observadaEmpresaIdInput.value = opcion.dataset.id || "";
+                    observadaEmpresaInput.value = opcion.dataset.razon || "";
+                    observadaCuitInput.value = opcion.dataset.cuit || "";
+                    observadaResultados.innerHTML = "";
+                    observadaResultados.classList.remove("active");
+                });
+            });
+        });
+    }
+
     if (form) {
         form.addEventListener("submit", (event) => {
             const sindicato = Number(document.getElementById("recaudacionMontoSindicato")?.value || 0);
@@ -3923,6 +4266,43 @@ function configurarRecaudacion() {
                 alert("Al menos uno de los montos debe ser mayor a 0.");
             }
         });
+    }
+
+    const observadaForm = document.getElementById("observadaRecaudacionForm");
+    if (observadaForm) {
+        observadaForm.addEventListener("submit", (event) => {
+            const periodo = document.getElementById("observadaPeriodo")?.value || "";
+            const sindicato = Number(document.getElementById("observadaSindicato")?.value || 0);
+            const mutual = Number(document.getElementById("observadaMutual")?.value || 0);
+            if (!periodoValidoCliente(periodo)) {
+                event.preventDefault();
+                alert("El período debe tener formato MM/AA.");
+            } else if (sindicato < 0 || mutual < 0) {
+                event.preventDefault();
+                alert("Los montos no pueden ser negativos.");
+            } else if (sindicato <= 0 && mutual <= 0) {
+                event.preventDefault();
+                alert("Al menos uno de los montos debe ser mayor a 0.");
+            }
+        });
+    }
+
+    const filtroObservadas = document.getElementById("filtroObservadasRecaudacion");
+    const filasObservadas = Array.from(document.querySelectorAll(".fila-observada-recaudacion"));
+    const observadasSinResultados = document.getElementById("observadasRecaudacionSinResultados");
+    if (filtroObservadas) {
+        const aplicarFiltroObservadas = () => {
+            let visibles = 0;
+            filasObservadas.forEach((fila) => {
+                const visible = coincideBusqueda(fila.dataset.busqueda || "", filtroObservadas.value);
+                fila.classList.toggle("fila-oculta", !visible);
+                if (visible) visibles++;
+            });
+            if (observadasSinResultados) {
+                observadasSinResultados.classList.toggle("fila-oculta", filasObservadas.length === 0 || visibles > 0);
+            }
+        };
+        filtroObservadas.addEventListener("input", aplicarFiltroObservadas);
     }
 
     const filtroEmpresas = document.getElementById("filtroEmpresasRecaudacion");
