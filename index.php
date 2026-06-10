@@ -1446,6 +1446,13 @@ textarea:focus-visible{
 .recaudacion-resumen .box{background:#def5e8}
 .recaudacion-tab{background:#def5e8;border-color:#82c99f}
 .recaudacion-tab.active{background:#22543d;border-color:#22543d}
+.recaudacion-subtabs{display:flex;flex-wrap:wrap;gap:8px;background:#f1fbf5;border:1px solid #a8dcbc;border-radius:12px;padding:8px;margin-bottom:18px}
+.recaudacion-subtab{width:auto;background:transparent;color:#086b43;border:1px solid transparent;padding:9px 14px}
+.recaudacion-subtab:hover{background:#def5e8}
+.recaudacion-subtab.active{background:#22543d;color:white;border-color:#22543d;box-shadow:0 2px 6px #0002}
+.recaudacion-subpanel{display:none}
+.recaudacion-subpanel.active{display:block}
+.recaudacion-subpanel .card-body{margin-top:16px}
 .dialogo-recaudacion{border:0;border-radius:16px;box-shadow:0 12px 35px #0004;max-width:520px;padding:24px}
 .dialogo-recaudacion::backdrop{background:#0007}
 .dialogo-acciones{display:flex;justify-content:flex-end;gap:10px;margin-top:18px}
@@ -1484,7 +1491,7 @@ th{background:#087a46;color:white}
 .empresa-coincidencia:first-of-type{border-top:0}
 .empresa-coincidencia button{width:auto;white-space:nowrap}
 .fila-oculta{display:none}
-@media(max-width:1000px){.grid,.resumen,.home-actions,.empresa-ficha-grid,.filters-grid,.filters-grid.empresas,.filters-grid.informe,.filters-grid.auditoria,.filters-grid.recaudacion,.filters-grid.empresas-recaudacion,.informe-resumen,.resumen-acuerdo-grid,.recaudacion-resumen{grid-template-columns:1fr}table{display:block;overflow-x:auto}}
+@media(max-width:1000px){.grid,.resumen,.home-actions,.empresa-ficha-grid,.filters-grid,.filters-grid.empresas,.filters-grid.informe,.filters-grid.auditoria,.filters-grid.recaudacion,.filters-grid.empresas-recaudacion,.informe-resumen,.resumen-acuerdo-grid,.recaudacion-resumen{grid-template-columns:1fr}.recaudacion-subtabs{display:grid;grid-template-columns:repeat(2,1fr)}.recaudacion-subtab{width:100%}table{display:block;overflow-x:auto}}
 </style>
 </head>
 <body>
@@ -2107,10 +2114,16 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 Este módulo registra transferencias acreditadas y funciona de manera independiente de pagos, deudas y acuerdos.
 </div>
 
-<div class="card recaudacion-card collapsible-card" id="empresas-recaudacion" data-card="empresas-recaudacion">
+<div class="recaudacion-subtabs" id="recaudacionSubtabs" data-inicial="<?= $editarEmpresaRecaudacion ? "empresas" : "cargar" ?>">
+<button type="button" class="recaudacion-subtab active" data-recaudacion-subtab="cargar">Cargar recaudación</button>
+<button type="button" class="recaudacion-subtab" data-recaudacion-subtab="empresas">Empresas</button>
+<button type="button" class="recaudacion-subtab" data-recaudacion-subtab="historial">Historial</button>
+<button type="button" class="recaudacion-subtab" data-recaudacion-subtab="informe">Informe</button>
+</div>
+
+<div class="card recaudacion-card recaudacion-subpanel" id="empresas-recaudacion" data-recaudacion-panel="empresas">
 <div class="card-header">
 <h2>Empresas</h2>
-<button type="button" class="toggle-card">Minimizar</button>
 </div>
 <div class="card-body">
 <?php if ($editarEmpresaRecaudacion): ?>
@@ -2181,10 +2194,9 @@ $cantidadMovimientosEmpresa = count(array_filter(
 </div>
 </div>
 
-<div class="card recaudacion-card collapsible-card" id="cargar-recaudacion" data-card="cargar-recaudacion">
+<div class="card recaudacion-card recaudacion-subpanel active" id="cargar-recaudacion" data-recaudacion-panel="cargar">
 <div class="card-header">
 <h2><?= $editarRecaudacion ? "Editar recaudación" : "Cargar recaudación" ?></h2>
-<button type="button" class="toggle-card">Minimizar</button>
 </div>
 <div class="card-body">
 <form method="post" id="recaudacionForm">
@@ -2242,10 +2254,9 @@ $cantidadMovimientosEmpresa = count(array_filter(
 </div>
 </div>
 
-<div class="card recaudacion-card collapsible-card" id="historial-recaudacion" data-card="historial-recaudacion">
+<div class="card recaudacion-card recaudacion-subpanel" id="historial-recaudacion" data-recaudacion-panel="historial">
 <div class="card-header">
 <h2>Historial recaudación</h2>
-<button type="button" class="toggle-card">Minimizar</button>
 </div>
 <div class="card-body">
 <div class="filters">
@@ -2299,10 +2310,9 @@ $cantidadMovimientosEmpresa = count(array_filter(
 </div>
 </div>
 
-<div class="card recaudacion-card collapsible-card" id="informe-recaudacion" data-card="informe-recaudacion">
+<div class="card recaudacion-card recaudacion-subpanel" id="informe-recaudacion" data-recaudacion-panel="informe">
 <div class="card-header">
 <h2>Informe recaudación</h2>
-<button type="button" class="toggle-card">Minimizar</button>
 </div>
 <div class="card-body">
 <div class="filters">
@@ -3837,6 +3847,25 @@ function configurarInformePeriodo() {
 }
 
 function configurarRecaudacion() {
+    const subtabs = document.getElementById("recaudacionSubtabs");
+    if (subtabs) {
+        const botonesSubtab = Array.from(subtabs.querySelectorAll(".recaudacion-subtab"));
+        const panelesSubtab = Array.from(document.querySelectorAll(".recaudacion-subpanel"));
+        const activarSubtab = (subtab) => {
+            botonesSubtab.forEach((boton) => {
+                boton.classList.toggle("active", boton.dataset.recaudacionSubtab === subtab);
+            });
+            panelesSubtab.forEach((panel) => {
+                panel.classList.toggle("active", panel.dataset.recaudacionPanel === subtab);
+            });
+        };
+
+        botonesSubtab.forEach((boton) => {
+            boton.addEventListener("click", () => activarSubtab(boton.dataset.recaudacionSubtab));
+        });
+        activarSubtab(subtabs.dataset.inicial || "cargar");
+    }
+
     const empresaInput = document.getElementById("recaudacionEmpresa");
     const empresaIdInput = document.getElementById("recaudacionEmpresaId");
     const cuitInput = document.getElementById("recaudacionCuit");
