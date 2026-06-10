@@ -15,13 +15,21 @@ $empresasFile = $dataDir . "/empresas.json";
 $pagosFile = $dataDir . "/pagos.json";
 $auditoriaFile = $dataDir . "/auditoria.json";
 $papeleraPagosFile = $dataDir . "/papelera_pagos.json";
+$recaudacionDir = $dataDir . "/recaudacion";
+$recaudacionEmpresasFile = $recaudacionDir . "/empresas.json";
+$recaudacionPagosFile = $recaudacionDir . "/pagos.json";
+$recaudacionAuditoriaFile = $recaudacionDir . "/auditoria.json";
 
 if (!is_dir($dataDir)) mkdir($dataDir, 0755, true);
 if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
+if (!is_dir($recaudacionDir)) mkdir($recaudacionDir, 0755, true);
 if (!file_exists($empresasFile)) file_put_contents($empresasFile, "[]");
 if (!file_exists($pagosFile)) file_put_contents($pagosFile, "[]");
 if (!file_exists($auditoriaFile)) file_put_contents($auditoriaFile, "[]");
 if (!file_exists($papeleraPagosFile)) file_put_contents($papeleraPagosFile, "[]");
+if (!file_exists($recaudacionEmpresasFile)) file_put_contents($recaudacionEmpresasFile, "[]");
+if (!file_exists($recaudacionPagosFile)) file_put_contents($recaudacionPagosFile, "[]");
+if (!file_exists($recaudacionAuditoriaFile)) file_put_contents($recaudacionAuditoriaFile, "[]");
 
 function e($v) {
     return htmlspecialchars($v ?? "", ENT_QUOTES, "UTF-8");
@@ -157,6 +165,23 @@ function buscarEmpresa($empresas, $id) {
         if (($e["id"] ?? "") === $id) return $e;
     }
     return null;
+}
+
+function buscarEmpresaPorRazon($empresas, $razon) {
+    $buscada = normalizarRazonSocial($razon);
+    if ($buscada === "") return null;
+    foreach ($empresas as $empresa) {
+        if (normalizarRazonSocial($empresa["razon"] ?? "") === $buscada) {
+            return $empresa;
+        }
+    }
+    return null;
+}
+
+function detalleRecaudacion($movimiento) {
+    return ($movimiento["empresa"] ?? "Empresa")
+        . " - " . ($movimiento["periodo"] ?? "")
+        . " - " . dinero($movimiento["total"] ?? 0);
 }
 
 function formaSocietariaEmpresa($razon) {
@@ -313,7 +338,7 @@ function agregarDirectorioZip($zip, $directorio, $nombreEnZip) {
     return true;
 }
 
-function enviarBackupManual($empresasFile, $pagosFile, $auditoriaFile, $papeleraPagosFile, $uploadDir) {
+function enviarBackupManual($empresasFile, $pagosFile, $auditoriaFile, $papeleraPagosFile, $uploadDir, $recaudacionDir) {
     if (!class_exists("ZipArchive")) return false;
 
     $nombreDescarga = "backup_" . date("Y-m-d_H-i") . ".zip";
@@ -332,6 +357,7 @@ function enviarBackupManual($empresasFile, $pagosFile, $auditoriaFile, $papelera
     $ok = $ok && is_file($auditoriaFile) && $zip->addFile($auditoriaFile, "auditoria.json");
     $ok = $ok && is_file($papeleraPagosFile) && $zip->addFile($papeleraPagosFile, "papelera_pagos.json");
     $ok = $ok && agregarDirectorioZip($zip, $uploadDir, "comprobantes");
+    $ok = $ok && agregarDirectorioZip($zip, $recaudacionDir, "recaudacion");
 
     if (!$zip->close() || !$ok) {
         @unlink($zipTemporal);
@@ -514,7 +540,7 @@ $backupError = "";
 if (isset($_GET["backup"])) {
     requerirAdmin();
     registrarAuditoria($auditoriaFile, "descargar_backup", "Descargó backup manual del sistema");
-    if (!enviarBackupManual($empresasFile, $pagosFile, $auditoriaFile, $papeleraPagosFile, $uploadDir)) {
+    if (!enviarBackupManual($empresasFile, $pagosFile, $auditoriaFile, $papeleraPagosFile, $uploadDir, $recaudacionDir)) {
         $backupError = "No fue posible generar el backup.";
     }
 }
@@ -523,10 +549,14 @@ $empresas = leerJson($empresasFile);
 $pagos = leerJson($pagosFile);
 $auditoria = leerJson($auditoriaFile);
 $papeleraPagos = leerJson($papeleraPagosFile);
+$recaudacionEmpresas = leerJson($recaudacionEmpresasFile);
+$recaudacionPagos = leerJson($recaudacionPagosFile);
+$recaudacionAuditoria = leerJson($recaudacionAuditoriaFile);
 $errorEmpresa = "";
 $coincidenciasEmpresa = ["cuit" => null, "exacta" => null, "parecidas" => []];
 $advertenciaEmpresa = false;
 $errorPago = "";
+$errorRecaudacion = "";
 
 if (isset($_GET["auditoria"]) && !$esAdmin) {
     accesoDenegado();
@@ -614,6 +644,141 @@ if (isset($_GET["exportar"]) && $_GET["exportar"] === "informe") {
     }
 
     enviarCsv("informe_periodo_" . ($periodoExport ? str_replace("/", "-", $periodoExport) : date("Y-m-d")) . ".csv", ["Empresa", "CUIT", "Tipo", "Periodo", "Fecha de pago", "Forma de pago", "Monto", "Observaciones", "Estado", "Cuota esperada", "Pendiente"], $filas);
+}
+
+if (isset($_GET["exportar"]) && $_GET["exportar"] === "recaudacion") {
+    $periodoExport = periodoParaInput($_GET["periodo"] ?? "");
+    $filas = [];
+    foreach (array_reverse($recaudacionPagos) as $movimiento) {
+        if ($periodoExport !== "" && periodoParaInput($movimiento["periodo"] ?? "") !== $periodoExport) continue;
+        $filas[] = [
+            $movimiento["empresa"] ?? "",
+            $movimiento["cuit"] ?? "",
+            periodoParaInput($movimiento["periodo"] ?? ""),
+            $movimiento["fecha_transferencia"] ?? "",
+            $movimiento["banco"] ?? "",
+            $movimiento["cuenta_acreditacion"] ?? "",
+            floatval($movimiento["monto_sindicato"] ?? 0),
+            floatval($movimiento["monto_mutual"] ?? 0),
+            floatval($movimiento["total"] ?? 0),
+            $movimiento["observaciones"] ?? "",
+            $movimiento["usuario"] ?? ""
+        ];
+    }
+    registrarAuditoria(
+        $recaudacionAuditoriaFile,
+        "exportar_recaudacion",
+        "Exportó informe de recaudación" . ($periodoExport !== "" ? " del período " . $periodoExport : " completo")
+    );
+    enviarCsv(
+        "recaudacion_" . ($periodoExport !== "" ? str_replace("/", "-", $periodoExport) : date("Y-m-d")) . ".csv",
+        ["Empresa", "CUIT", "Periodo", "Fecha transferencia", "Banco", "Cuenta acreditacion", "Monto sindicato", "Monto mutual", "Total", "Observaciones", "Usuario"],
+        $filas
+    );
+}
+
+if (isset($_POST["guardar_recaudacion"])) {
+    $recaudacionId = trim($_POST["recaudacion_id"] ?? "");
+    $recaudacionId = $recaudacionId !== "" ? $recaudacionId : uniqid("rec_");
+    $empresaIdRecaudacion = trim($_POST["recaudacion_empresa_id"] ?? "");
+    $razonRecaudacion = trim($_POST["recaudacion_empresa"] ?? "");
+    $cuitRecaudacion = trim($_POST["recaudacion_cuit"] ?? "");
+    $periodoRecaudacion = trim($_POST["recaudacion_periodo"] ?? "");
+    $fechaTransferencia = trim($_POST["recaudacion_fecha_transferencia"] ?? "");
+    $montoSindicato = floatval($_POST["recaudacion_monto_sindicato"] ?? 0);
+    $montoMutual = floatval($_POST["recaudacion_monto_mutual"] ?? 0);
+
+    $empresaSeleccionada = $empresaIdRecaudacion !== "" ? buscarEmpresa($empresas, $empresaIdRecaudacion) : null;
+    if (!$empresaSeleccionada && $empresaIdRecaudacion !== "") {
+        $empresaSeleccionada = buscarEmpresa($recaudacionEmpresas, $empresaIdRecaudacion);
+    }
+    if (!$empresaSeleccionada) {
+        $empresaSeleccionada = buscarEmpresaPorRazon($empresas, $razonRecaudacion);
+    }
+    if (!$empresaSeleccionada) {
+        $empresaSeleccionada = buscarEmpresaPorRazon($recaudacionEmpresas, $razonRecaudacion);
+    }
+
+    if ($razonRecaudacion === "") {
+        $errorRecaudacion = "La empresa es obligatoria.";
+    } elseif (!periodoValido($periodoRecaudacion)) {
+        $errorRecaudacion = "El período debe tener formato MM/AA.";
+    } elseif ($fechaTransferencia === "") {
+        $errorRecaudacion = "La fecha de transferencia es obligatoria.";
+    } elseif ($montoSindicato < 0 || $montoMutual < 0) {
+        $errorRecaudacion = "Los montos no pueden ser negativos.";
+    } elseif ($montoSindicato <= 0 && $montoMutual <= 0) {
+        $errorRecaudacion = "Al menos uno de los montos debe ser mayor a 0.";
+    }
+
+    if ($errorRecaudacion === "") {
+        if ($empresaSeleccionada) {
+            $empresaIdRecaudacion = $empresaSeleccionada["id"] ?? "";
+            $razonRecaudacion = $empresaSeleccionada["razon"] ?? $razonRecaudacion;
+            if (trim($cuitRecaudacion) === "") {
+                $cuitRecaudacion = $empresaSeleccionada["cuit"] ?? "";
+            }
+        } else {
+            $empresaIdRecaudacion = uniqid("emp_rec_");
+            $empresaSeleccionada = [
+                "id" => $empresaIdRecaudacion,
+                "razon" => $razonRecaudacion,
+                "cuit" => $cuitRecaudacion,
+                "fecha_carga" => date("Y-m-d H:i:s")
+            ];
+            $recaudacionEmpresas[] = $empresaSeleccionada;
+            guardarJson($recaudacionEmpresasFile, $recaudacionEmpresas);
+            registrarAuditoria(
+                $recaudacionAuditoriaFile,
+                "crear_empresa_recaudacion",
+                "Creó empresa de recaudación " . detalleEmpresa($empresaSeleccionada)
+            );
+        }
+
+        $existente = null;
+        foreach ($recaudacionPagos as $movimientoGuardado) {
+            if (($movimientoGuardado["id"] ?? "") === $recaudacionId) {
+                $existente = $movimientoGuardado;
+                break;
+            }
+        }
+
+        $nuevoMovimiento = [
+            "id" => $recaudacionId,
+            "empresa_id" => $empresaIdRecaudacion,
+            "empresa" => $razonRecaudacion,
+            "cuit" => $cuitRecaudacion,
+            "periodo" => $periodoRecaudacion,
+            "fecha_transferencia" => $fechaTransferencia,
+            "banco" => trim($_POST["recaudacion_banco"] ?? ""),
+            "cuenta_acreditacion" => trim($_POST["recaudacion_cuenta_acreditacion"] ?? ""),
+            "monto_sindicato" => $montoSindicato,
+            "monto_mutual" => $montoMutual,
+            "total" => $montoSindicato + $montoMutual,
+            "observaciones" => trim($_POST["recaudacion_observaciones"] ?? ""),
+            "fecha_carga" => $existente["fecha_carga"] ?? date("Y-m-d H:i:s"),
+            "usuario" => usuarioActual()
+        ];
+
+        $editado = false;
+        foreach ($recaudacionPagos as $indice => $movimiento) {
+            if (($movimiento["id"] ?? "") === $recaudacionId) {
+                $recaudacionPagos[$indice] = $nuevoMovimiento;
+                $editado = true;
+                break;
+            }
+        }
+        if (!$editado) $recaudacionPagos[] = $nuevoMovimiento;
+
+        guardarJson($recaudacionPagosFile, $recaudacionPagos);
+        registrarAuditoria(
+            $recaudacionAuditoriaFile,
+            $editado ? "editar_recaudacion" : "crear_recaudacion",
+            ($editado ? "Editó recaudación " : "Creó recaudación ") . detalleRecaudacion($nuevoMovimiento)
+        );
+        header("Location: index.php#recaudacion");
+        exit;
+    }
 }
 
 if (isset($_POST["guardar_empresa"])) {
@@ -918,6 +1083,31 @@ if (isset($_GET["eliminar_comprobante"])) {
     exit;
 }
 
+if (isset($_GET["eliminar_recaudacion"])) {
+    $id = trim($_GET["eliminar_recaudacion"] ?? "");
+    $movimientoEliminado = null;
+    foreach ($recaudacionPagos as $movimiento) {
+        if (($movimiento["id"] ?? "") === $id) {
+            $movimientoEliminado = $movimiento;
+            break;
+        }
+    }
+    if ($movimientoEliminado) {
+        $recaudacionPagos = array_values(array_filter(
+            $recaudacionPagos,
+            fn($movimiento) => ($movimiento["id"] ?? "") !== $id
+        ));
+        guardarJson($recaudacionPagosFile, $recaudacionPagos);
+        registrarAuditoria(
+            $recaudacionAuditoriaFile,
+            "eliminar_recaudacion",
+            "Eliminó recaudación " . detalleRecaudacion($movimientoEliminado)
+        );
+    }
+    header("Location: index.php#recaudacion");
+    exit;
+}
+
 $editarEmpresa = null;
 if (isset($_GET["editar_empresa"])) {
     $editarEmpresa = buscarEmpresa($empresas, $_GET["editar_empresa"]);
@@ -973,6 +1163,32 @@ if ($errorPago !== "" && isset($_POST["guardar_pago"])) {
     ];
 }
 
+$editarRecaudacion = null;
+if (isset($_GET["editar_recaudacion"])) {
+    foreach ($recaudacionPagos as $movimiento) {
+        if (($movimiento["id"] ?? "") === $_GET["editar_recaudacion"]) {
+            $editarRecaudacion = $movimiento;
+            break;
+        }
+    }
+}
+
+if ($errorRecaudacion !== "" && isset($_POST["guardar_recaudacion"])) {
+    $editarRecaudacion = [
+        "id" => $_POST["recaudacion_id"] ?? "",
+        "empresa_id" => $_POST["recaudacion_empresa_id"] ?? "",
+        "empresa" => $_POST["recaudacion_empresa"] ?? "",
+        "cuit" => $_POST["recaudacion_cuit"] ?? "",
+        "periodo" => $_POST["recaudacion_periodo"] ?? "",
+        "fecha_transferencia" => $_POST["recaudacion_fecha_transferencia"] ?? "",
+        "banco" => $_POST["recaudacion_banco"] ?? "",
+        "cuenta_acreditacion" => $_POST["recaudacion_cuenta_acreditacion"] ?? "",
+        "monto_sindicato" => $_POST["recaudacion_monto_sindicato"] ?? "",
+        "monto_mutual" => $_POST["recaudacion_monto_mutual"] ?? "",
+        "observaciones" => $_POST["recaudacion_observaciones"] ?? ""
+    ];
+}
+
 $totalCobrado = 0;
 $cobradoOS = 0;
 $cobradoSindicato = 0;
@@ -1006,6 +1222,12 @@ $cobradoOS = max($cobradoOS, 0);
 $cobradoSindicato = max($cobradoSindicato, 0);
 $cobradoMutual = max($cobradoMutual, 0);
 $totalCobradoEsteMes = max($totalCobradoEsteMes, 0);
+$recaudacionMesActual = 0;
+foreach ($recaudacionPagos as $movimiento) {
+    if (substr($movimiento["fecha_transferencia"] ?? "", 0, 7) === $mesActual) {
+        $recaudacionMesActual += floatval($movimiento["total"] ?? 0);
+    }
+}
 $deudoresPeriodoActual = 0;
 foreach ($empresas as $empresa) {
     if (!empresaActiva($empresa)) continue;
@@ -1017,7 +1239,9 @@ foreach ($empresas as $empresa) {
         }
     }
 }
-$tabInicial = $editarPago ? "cargar-pago" : ($editarEmpresa ? "nueva-empresa" : ((isset($_POST["guardar_acuerdo"]) && $errorEmpresa !== "") ? "cargar-acuerdo" : "inicio"));
+$tabInicial = ($editarRecaudacion || $errorRecaudacion !== "")
+    ? "recaudacion"
+    : ($editarPago ? "cargar-pago" : ($editarEmpresa ? "nueva-empresa" : ((isset($_POST["guardar_acuerdo"]) && $errorEmpresa !== "") ? "cargar-acuerdo" : "inicio")));
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -1037,7 +1261,7 @@ main{padding:20px}
 .tab-btn.active{background:#087a46;color:white;border-color:#087a46}
 .tab-panel{display:none}
 .tab-panel.active{display:block}
-.home-actions{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:16px}
+.home-actions{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-top:16px}
 .home-actions button{min-height:64px;font-size:16px}
 .empresa-ficha{background:#f7fbf9;border:1px solid #dcefe6;border-radius:12px;padding:16px;margin:16px 0}
 .empresa-ficha-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
@@ -1058,7 +1282,7 @@ main{padding:20px}
 .card.is-collapsed .card-body{display:none}
 .quick-actions{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px}
 .quick-actions button{width:auto}
-.resumen{display:grid;grid-template-columns:repeat(5,1fr);gap:15px}
+.resumen{display:grid;grid-template-columns:repeat(6,1fr);gap:15px}
 .box{background:#eaf7f0;padding:18px;border-radius:14px}
 .label{font-size:14px;color:#555}
 .num{font-size:26px;font-weight:bold;color:#087a46;margin-top:5px}
@@ -1128,6 +1352,14 @@ textarea:focus-visible{
 .filters-grid.empresas{grid-template-columns:1.2fr 1.2fr 2fr 1fr auto}
 .filters-grid.informe{grid-template-columns:1fr 1fr auto auto}
 .filters-grid.auditoria{grid-template-columns:1fr 1.2fr 2fr 1fr 1fr auto auto}
+.filters-grid.recaudacion{grid-template-columns:2fr 1fr 1fr 1fr 1fr auto}
+.recaudacion-card{border-left:6px solid #38a169;background:linear-gradient(90deg,#f1fbf5 0,#fff 180px)}
+.recaudacion-card h2,.recaudacion-card h3{color:#086b43}
+.recaudacion-intro{background:#def5e8;border:1px solid #a8dcbc;border-radius:12px;padding:12px 14px;margin-bottom:16px;color:#22543d}
+.recaudacion-resumen{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:14px 0}
+.recaudacion-resumen .box{background:#def5e8}
+.recaudacion-tab{background:#def5e8;border-color:#82c99f}
+.recaudacion-tab.active{background:#22543d;border-color:#22543d}
 .filters input,.filters select{width:100%;background:white}
 .filters button{white-space:nowrap}
 .informe-resumen{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:12px 0 16px}
@@ -1162,7 +1394,7 @@ th{background:#087a46;color:white}
 .empresa-coincidencia:first-of-type{border-top:0}
 .empresa-coincidencia button{width:auto;white-space:nowrap}
 .fila-oculta{display:none}
-@media(max-width:1000px){.grid,.resumen,.home-actions,.empresa-ficha-grid,.filters-grid,.filters-grid.empresas,.filters-grid.informe,.filters-grid.auditoria,.informe-resumen,.resumen-acuerdo-grid{grid-template-columns:1fr}table{display:block;overflow-x:auto}}
+@media(max-width:1000px){.grid,.resumen,.home-actions,.empresa-ficha-grid,.filters-grid,.filters-grid.empresas,.filters-grid.informe,.filters-grid.auditoria,.filters-grid.recaudacion,.informe-resumen,.resumen-acuerdo-grid,.recaudacion-resumen{grid-template-columns:1fr}table{display:block;overflow-x:auto}}
 </style>
 </head>
 <body>
@@ -1186,6 +1418,7 @@ th{background:#087a46;color:white}
 <button type="button" class="tab-btn" data-tab="nueva-empresa">Nueva empresa</button>
 <button type="button" class="tab-btn" data-tab="informe-periodo">Informe período</button>
 <button type="button" class="tab-btn" data-tab="pagos">Pagos registrados</button>
+<button type="button" class="tab-btn recaudacion-tab" data-tab="recaudacion">Recaudación Sindical y Mutual</button>
 <?php if ($esAdmin): ?>
 <button type="button" class="tab-btn" data-tab="auditoria">Auditoría</button>
 <?php endif; ?>
@@ -1203,6 +1436,7 @@ th{background:#087a46;color:white}
 <div class="box"><div class="label">Total cobrado este mes</div><div class="num"><?= dinero($totalCobradoEsteMes) ?></div></div>
 <div class="box"><div class="label">Total cobrado general</div><div class="num"><?= dinero($totalCobrado) ?></div></div>
 <div class="box"><div class="label">Deudores <?= e($periodoActual) ?></div><div class="num"><?= e($deudoresPeriodoActual) ?></div></div>
+<div class="box"><div class="label">Recaudación del mes</div><div class="num"><?= dinero($recaudacionMesActual) ?></div></div>
 </div>
 
 <div class="card">
@@ -1215,6 +1449,7 @@ th{background:#087a46;color:white}
 <button type="button" class="tab-jump" data-tab="cargar-acuerdo">Cargar acuerdo</button>
 <button type="button" class="tab-jump" data-tab="informe-periodo">Informe período</button>
 <button type="button" class="tab-jump" data-tab="nueva-empresa">Nueva empresa</button>
+<button type="button" class="tab-jump recaudacion-tab" data-tab="recaudacion">Recaudación Sindical y Mutual</button>
 </div>
 </div>
 </section>
@@ -1776,6 +2011,154 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 </div>
 </section>
 
+<section class="tab-panel" id="tab-recaudacion">
+<div class="recaudacion-intro">
+<strong>Recaudación Sindical y Mutual</strong><br>
+Este módulo registra transferencias acreditadas y funciona de manera independiente de pagos, deudas y acuerdos.
+</div>
+
+<div class="card recaudacion-card collapsible-card" id="cargar-recaudacion" data-card="cargar-recaudacion">
+<div class="card-header">
+<h2><?= $editarRecaudacion ? "Editar recaudación" : "Cargar recaudación" ?></h2>
+<button type="button" class="toggle-card">Minimizar</button>
+</div>
+<div class="card-body">
+<form method="post" id="recaudacionForm">
+<input type="hidden" name="recaudacion_id" value="<?= e($editarRecaudacion["id"] ?? "") ?>">
+<input type="hidden" name="recaudacion_empresa_id" id="recaudacionEmpresaId" value="<?= e($editarRecaudacion["empresa_id"] ?? "") ?>">
+<div class="grid">
+<div class="campo">
+<label for="recaudacionEmpresa">Empresa</label>
+<div class="empresa-picker">
+<input type="text" id="recaudacionEmpresa" name="recaudacion_empresa" class="empresa-picker-input" autocomplete="off" placeholder="Buscar o escribir empresa nueva" required value="<?= e($editarRecaudacion["empresa"] ?? "") ?>">
+<div class="empresa-picker-results" id="recaudacionEmpresaResultados"></div>
+</div>
+</div>
+<div class="campo">
+<label for="recaudacionCuit">CUIT</label>
+<input type="text" id="recaudacionCuit" name="recaudacion_cuit" placeholder="CUIT" value="<?= e($editarRecaudacion["cuit"] ?? "") ?>">
+</div>
+<div class="campo">
+<label for="recaudacionPeriodo">Período</label>
+<input type="text" id="recaudacionPeriodo" name="recaudacion_periodo" class="periodo-input" maxlength="5" inputmode="numeric" placeholder="MM/AA" required value="<?= e(periodoParaInput($editarRecaudacion["periodo"] ?? "")) ?>">
+</div>
+<div class="campo">
+<label for="recaudacionFecha">Fecha transferencia</label>
+<input type="date" id="recaudacionFecha" name="recaudacion_fecha_transferencia" required value="<?= e($editarRecaudacion["fecha_transferencia"] ?? date("Y-m-d")) ?>">
+</div>
+<div class="campo">
+<label for="recaudacionBanco">Banco</label>
+<input type="text" id="recaudacionBanco" name="recaudacion_banco" placeholder="Banco" value="<?= e($editarRecaudacion["banco"] ?? "") ?>">
+</div>
+<div class="campo">
+<label for="recaudacionCuenta">Cuenta acreditación</label>
+<input type="text" id="recaudacionCuenta" name="recaudacion_cuenta_acreditacion" placeholder="Cuenta" value="<?= e($editarRecaudacion["cuenta_acreditacion"] ?? "") ?>">
+</div>
+<div class="campo">
+<label for="recaudacionMontoSindicato">Monto sindicato</label>
+<input type="number" id="recaudacionMontoSindicato" name="recaudacion_monto_sindicato" min="0" step="0.01" value="<?= e($editarRecaudacion["monto_sindicato"] ?? "0") ?>">
+</div>
+<div class="campo">
+<label for="recaudacionMontoMutual">Monto mutual</label>
+<input type="number" id="recaudacionMontoMutual" name="recaudacion_monto_mutual" min="0" step="0.01" value="<?= e($editarRecaudacion["monto_mutual"] ?? "0") ?>">
+</div>
+</div>
+<div class="campo" style="margin-top:12px">
+<label for="recaudacionObservaciones">Observaciones</label>
+<textarea id="recaudacionObservaciones" name="recaudacion_observaciones" placeholder="Observaciones"><?= e($editarRecaudacion["observaciones"] ?? "") ?></textarea>
+</div>
+<?php if ($errorRecaudacion !== ""): ?>
+<p class="error"><?= e($errorRecaudacion) ?></p>
+<?php endif; ?>
+<button type="submit" name="guardar_recaudacion"><?= $editarRecaudacion ? "Guardar cambios" : "Registrar recaudación" ?></button>
+<?php if ($editarRecaudacion): ?>
+<a class="btn-cancelar" href="index.php#recaudacion">Cancelar</a>
+<?php endif; ?>
+</form>
+</div>
+</div>
+
+<div class="card recaudacion-card collapsible-card" id="historial-recaudacion" data-card="historial-recaudacion">
+<div class="card-header">
+<h2>Historial recaudación</h2>
+<button type="button" class="toggle-card">Minimizar</button>
+</div>
+<div class="card-body">
+<div class="filters">
+<div class="filters-grid recaudacion">
+<input type="text" id="filtroRecaudacionEmpresa" placeholder="Empresa o CUIT">
+<input type="text" id="filtroRecaudacionPeriodo" class="periodo-input" maxlength="5" inputmode="numeric" placeholder="Período MM/AA">
+<input type="text" id="filtroRecaudacionBanco" placeholder="Banco">
+<input type="date" id="filtroRecaudacionDesde" title="Fecha desde">
+<input type="date" id="filtroRecaudacionHasta" title="Fecha hasta">
+<button type="button" id="limpiarFiltrosRecaudacion">Limpiar filtros</button>
+</div>
+</div>
+<table>
+<thead>
+<tr>
+<th>Fecha transferencia</th><th>Empresa</th><th>CUIT</th><th>Período</th><th>Banco</th>
+<th>Cuenta acreditación</th><th>Monto sindicato</th><th>Monto mutual</th><th>Total</th>
+<th>Observaciones</th><th>Usuario</th><th>Acciones</th>
+</tr>
+</thead>
+<tbody>
+<?php if (empty($recaudacionPagos)): ?>
+<tr><td colspan="12" class="sin">Todavía no hay movimientos de recaudación.</td></tr>
+<?php endif; ?>
+<?php foreach (array_reverse($recaudacionPagos) as $movimiento): ?>
+<tr class="fila-recaudacion"
+    data-busqueda="<?= e(($movimiento["empresa"] ?? "") . " " . ($movimiento["cuit"] ?? "")) ?>"
+    data-periodo="<?= e(periodoParaInput($movimiento["periodo"] ?? "")) ?>"
+    data-banco="<?= e($movimiento["banco"] ?? "") ?>"
+    data-fecha="<?= e($movimiento["fecha_transferencia"] ?? "") ?>">
+<td><?= e($movimiento["fecha_transferencia"] ?? "") ?></td>
+<td><?= e($movimiento["empresa"] ?? "") ?></td>
+<td><?= e($movimiento["cuit"] ?? "") ?></td>
+<td><?= e(periodoParaInput($movimiento["periodo"] ?? "")) ?></td>
+<td><?= e($movimiento["banco"] ?? "") ?></td>
+<td><?= e($movimiento["cuenta_acreditacion"] ?? "") ?></td>
+<td><?= dinero($movimiento["monto_sindicato"] ?? 0) ?></td>
+<td><?= dinero($movimiento["monto_mutual"] ?? 0) ?></td>
+<td><?= dinero($movimiento["total"] ?? 0) ?></td>
+<td><?= e($movimiento["observaciones"] ?? "") ?></td>
+<td><?= e($movimiento["usuario"] ?? "") ?></td>
+<td class="acciones">
+<a href="?editar_recaudacion=<?= e($movimiento["id"] ?? "") ?>#recaudacion" title="Editar recaudación">Editar</a>
+<a class="btn-danger" href="?eliminar_recaudacion=<?= e($movimiento["id"] ?? "") ?>" onclick="return confirm('¿Eliminar este movimiento de recaudación?')" title="Eliminar recaudación" aria-label="Eliminar recaudación">X</a>
+</td>
+</tr>
+<?php endforeach; ?>
+<tr id="recaudacionSinResultados" class="fila-oculta"><td colspan="12" class="sin">No se encontraron movimientos con esos filtros.</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<div class="card recaudacion-card collapsible-card" id="informe-recaudacion" data-card="informe-recaudacion">
+<div class="card-header">
+<h2>Informe recaudación</h2>
+<button type="button" class="toggle-card">Minimizar</button>
+</div>
+<div class="card-body">
+<div class="filters">
+<div class="filters-grid informe">
+<input type="text" id="informeRecaudacionPeriodo" class="periodo-input" maxlength="5" inputmode="numeric" placeholder="Período MM/AA">
+<button type="button" id="consultarInformeRecaudacion">Consultar</button>
+<button type="button" id="limpiarInformeRecaudacion">Todos los períodos</button>
+<a class="btn-secundario" id="exportarInformeRecaudacion" href="?exportar=recaudacion">Exportar CSV</a>
+</div>
+</div>
+<div class="recaudacion-resumen">
+<div class="box"><div class="label">Total sindicato</div><div class="num" id="informeRecSindicato">$0,00</div></div>
+<div class="box"><div class="label">Total mutual</div><div class="num" id="informeRecMutual">$0,00</div></div>
+<div class="box"><div class="label">Total general</div><div class="num" id="informeRecTotal">$0,00</div></div>
+<div class="box"><div class="label">Cantidad de movimientos</div><div class="num" id="informeRecCantidad">0</div></div>
+</div>
+</div>
+</div>
+</section>
+
 <?php if ($esAdmin): ?>
 <section class="tab-panel" id="tab-auditoria">
 <div class="card collapsible-card" id="auditoria" data-card="auditoria">
@@ -1848,6 +2231,8 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 <script>
 const empresasData = <?= json_encode($empresas, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
 const pagosData = <?= json_encode($pagos, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
+const recaudacionEmpresasData = <?= json_encode($recaudacionEmpresas, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
+const recaudacionPagosData = <?= json_encode($recaudacionPagos, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
 const tiposInforme = ["Obra Social", "Sindicato", "Mutual"];
 const tabInicial = <?= json_encode($tabInicial, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
 
@@ -3278,6 +3663,141 @@ function configurarInformePeriodo() {
     tipoInput.addEventListener("change", render);
 }
 
+function configurarRecaudacion() {
+    const empresaInput = document.getElementById("recaudacionEmpresa");
+    const empresaIdInput = document.getElementById("recaudacionEmpresaId");
+    const cuitInput = document.getElementById("recaudacionCuit");
+    const resultados = document.getElementById("recaudacionEmpresaResultados");
+    const form = document.getElementById("recaudacionForm");
+    const empresasRecaudacion = [
+        ...empresasData.map((empresa) => ({ ...empresa, origen: "Padrón general" })),
+        ...recaudacionEmpresasData.map((empresa) => ({ ...empresa, origen: "Recaudación" }))
+    ];
+
+    if (empresaInput && empresaIdInput && cuitInput && resultados) {
+        empresaInput.addEventListener("input", () => {
+            empresaIdInput.value = "";
+            cuitInput.value = "";
+            const texto = normalizarTexto(empresaInput.value);
+            if (texto.length < 2) {
+                resultados.innerHTML = "";
+                resultados.classList.remove("active");
+                return;
+            }
+
+            const coincidencias = empresasRecaudacion
+                .filter((empresa) => coincideBusqueda((empresa.razon || "") + " " + (empresa.cuit || ""), texto))
+                .slice(0, 30);
+            resultados.innerHTML = coincidencias.length
+                ? coincidencias.map((empresa) => `<div class="empresa-picker-option" data-id="${escapeHtml(empresa.id || "")}" data-razon="${escapeHtml(empresa.razon || "")}" data-cuit="${escapeHtml(empresa.cuit || "")}"><strong>${escapeHtml(empresa.razon || "")}</strong> - ${escapeHtml(empresa.cuit || "")}<br><small>${escapeHtml(empresa.origen)}</small></div>`).join("")
+                : '<div class="empresa-picker-option sin">Sin coincidencias. Se creará en el padrón de recaudación.</div>';
+            resultados.classList.add("active");
+
+            resultados.querySelectorAll(".empresa-picker-option[data-id]").forEach((opcion) => {
+                opcion.addEventListener("click", () => {
+                    empresaIdInput.value = opcion.dataset.id || "";
+                    empresaInput.value = opcion.dataset.razon || "";
+                    cuitInput.value = opcion.dataset.cuit || "";
+                    resultados.innerHTML = "";
+                    resultados.classList.remove("active");
+                });
+            });
+        });
+    }
+
+    if (form) {
+        form.addEventListener("submit", (event) => {
+            const sindicato = Number(document.getElementById("recaudacionMontoSindicato")?.value || 0);
+            const mutual = Number(document.getElementById("recaudacionMontoMutual")?.value || 0);
+            const periodo = document.getElementById("recaudacionPeriodo")?.value || "";
+            if (!periodoValidoCliente(periodo)) {
+                event.preventDefault();
+                alert("El período debe tener formato MM/AA.");
+            } else if (sindicato < 0 || mutual < 0) {
+                event.preventDefault();
+                alert("Los montos no pueden ser negativos.");
+            } else if (sindicato <= 0 && mutual <= 0) {
+                event.preventDefault();
+                alert("Al menos uno de los montos debe ser mayor a 0.");
+            }
+        });
+    }
+
+    const filtroEmpresa = document.getElementById("filtroRecaudacionEmpresa");
+    const filtroPeriodo = document.getElementById("filtroRecaudacionPeriodo");
+    const filtroBanco = document.getElementById("filtroRecaudacionBanco");
+    const filtroDesde = document.getElementById("filtroRecaudacionDesde");
+    const filtroHasta = document.getElementById("filtroRecaudacionHasta");
+    const limpiarFiltros = document.getElementById("limpiarFiltrosRecaudacion");
+    const sinResultados = document.getElementById("recaudacionSinResultados");
+    const filas = Array.from(document.querySelectorAll(".fila-recaudacion"));
+
+    if (filtroEmpresa && filtroPeriodo && filtroBanco && filtroDesde && filtroHasta && limpiarFiltros) {
+        const aplicarFiltros = () => {
+            let visibles = 0;
+            filas.forEach((fila) => {
+                const fecha = fila.dataset.fecha || "";
+                const visible = coincideBusqueda(fila.dataset.busqueda || "", filtroEmpresa.value)
+                    && (!filtroPeriodo.value || (fila.dataset.periodo || "").startsWith(filtroPeriodo.value))
+                    && coincideBusqueda(fila.dataset.banco || "", filtroBanco.value)
+                    && (!filtroDesde.value || fecha >= filtroDesde.value)
+                    && (!filtroHasta.value || fecha <= filtroHasta.value);
+                fila.classList.toggle("fila-oculta", !visible);
+                if (visible) visibles++;
+            });
+            if (sinResultados) sinResultados.classList.toggle("fila-oculta", filas.length === 0 || visibles > 0);
+        };
+        [filtroEmpresa, filtroPeriodo, filtroBanco].forEach((control) => control.addEventListener("input", aplicarFiltros));
+        [filtroDesde, filtroHasta].forEach((control) => control.addEventListener("change", aplicarFiltros));
+        limpiarFiltros.addEventListener("click", () => {
+            filtroEmpresa.value = "";
+            filtroPeriodo.value = "";
+            filtroBanco.value = "";
+            filtroDesde.value = "";
+            filtroHasta.value = "";
+            aplicarFiltros();
+        });
+    }
+
+    const informePeriodo = document.getElementById("informeRecaudacionPeriodo");
+    const consultar = document.getElementById("consultarInformeRecaudacion");
+    const limpiarInforme = document.getElementById("limpiarInformeRecaudacion");
+    const exportar = document.getElementById("exportarInformeRecaudacion");
+    const totalSindicato = document.getElementById("informeRecSindicato");
+    const totalMutual = document.getElementById("informeRecMutual");
+    const totalGeneral = document.getElementById("informeRecTotal");
+    const cantidad = document.getElementById("informeRecCantidad");
+
+    if (informePeriodo && consultar && limpiarInforme && exportar && totalSindicato && totalMutual && totalGeneral && cantidad) {
+        const renderInforme = () => {
+            const periodo = informePeriodo.value;
+            if (periodo && !periodoValidoCliente(periodo)) {
+                alert("El período debe tener formato MM/AA.");
+                return;
+            }
+            const movimientos = recaudacionPagosData.filter((movimiento) =>
+                !periodo || periodoNormalizado(movimiento.periodo || "") === periodo
+            );
+            const sindicato = movimientos.reduce((total, movimiento) => total + Number(movimiento.monto_sindicato || 0), 0);
+            const mutual = movimientos.reduce((total, movimiento) => total + Number(movimiento.monto_mutual || 0), 0);
+            totalSindicato.textContent = dineroCliente(sindicato);
+            totalMutual.textContent = dineroCliente(mutual);
+            totalGeneral.textContent = dineroCliente(sindicato + mutual);
+            cantidad.textContent = movimientos.length.toString();
+            exportar.href = `?exportar=recaudacion${periodo ? "&periodo=" + encodeURIComponent(periodo) : ""}`;
+        };
+        consultar.addEventListener("click", renderInforme);
+        limpiarInforme.addEventListener("click", () => {
+            informePeriodo.value = "";
+            renderInforme();
+        });
+        informePeriodo.addEventListener("input", () => {
+            if (!informePeriodo.value || periodoValidoCliente(informePeriodo.value)) renderInforme();
+        });
+        renderInforme();
+    }
+}
+
 function configurarBuscadoresEmpresa() {
     const homeInput = document.getElementById("homeEmpresaSearch");
     const homeResultados = document.getElementById("homeEmpresaResultados");
@@ -3306,6 +3826,7 @@ configurarInformePeriodo();
 configurarFiltrosEmpresas();
 configurarFiltrosPagos();
 configurarFiltrosAuditoria();
+configurarRecaudacion();
 </script>
 </body>
 </html>
