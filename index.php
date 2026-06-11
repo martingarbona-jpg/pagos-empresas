@@ -86,6 +86,37 @@ function detallePago($pago, $empresas) {
         . " - " . dinero($pago["monto"] ?? 0);
 }
 
+function fechaChequeValida($fecha) {
+    $fecha = trim($fecha ?? "");
+    $objeto = DateTime::createFromFormat("!Y-m-d", $fecha);
+    return $objeto && $objeto->format("Y-m-d") === $fecha;
+}
+
+function chequesPago($pago) {
+    return isset($pago["cheques"]) && is_array($pago["cheques"]) ? $pago["cheques"] : [];
+}
+
+function estadoCheque($cheque, $hoy = null) {
+    if (!empty($cheque["cobrado"])) return "Cobrado";
+    $fecha = trim($cheque["fecha_cobro"] ?? "");
+    $hoy = $hoy ?: date("Y-m-d");
+    if ($fecha === $hoy) return "Vence hoy";
+    if ($fecha !== "" && $fecha < $hoy) return "Vencido";
+    return "Pendiente";
+}
+
+function fechasCheques($cheques) {
+    return array_values(array_map(
+        fn($cheque) => trim($cheque["fecha_cobro"] ?? ""),
+        is_array($cheques) ? $cheques : []
+    ));
+}
+
+function fechaParaMostrar($fecha) {
+    if (!fechaChequeValida($fecha)) return trim($fecha ?? "");
+    return DateTime::createFromFormat("!Y-m-d", $fecha)->format("d/m/Y");
+}
+
 function enviarCsv($nombreArchivo, $columnas, $filas) {
     while (ob_get_level() > 0) {
         ob_end_clean();
@@ -752,7 +783,50 @@ if (isset($_POST["guardar_pago"])) {
     $empresaIdPago = $_POST["empresa_id"] ?? "";
     $tipoPago = $_POST["tipo"] ?? "";
     $tipoDePago = $_POST["tipo_pago"] ?? "";
+    $formaPago = $_POST["forma_pago"] ?? "";
     $empresaPago = buscarEmpresa($empresas, $empresaIdPago);
+    $pagoExistente = null;
+    foreach ($pagos as $pagoGuardado) {
+        if (($pagoGuardado["id"] ?? "") === $id) {
+            $pagoExistente = $pagoGuardado;
+            break;
+        }
+    }
+
+    $cheques = [];
+    $fechasCheque = isset($_POST["cheque_fecha"]) && is_array($_POST["cheque_fecha"]) ? $_POST["cheque_fecha"] : [];
+    $indicesCheque = isset($_POST["cheque_indice"]) && is_array($_POST["cheque_indice"]) ? $_POST["cheque_indice"] : [];
+    $chequesExistentes = chequesPago($pagoExistente);
+
+    if ($formaPago === "Cheque") {
+        foreach ($fechasCheque as $posicion => $fechaCheque) {
+            $fechaCheque = trim($fechaCheque ?? "");
+            $indiceOriginal = isset($indicesCheque[$posicion]) && preg_match('/^\d+$/', (string)$indicesCheque[$posicion])
+                ? intval($indicesCheque[$posicion])
+                : -1;
+            $chequeExistente = $indiceOriginal >= 0 && isset($chequesExistentes[$indiceOriginal]) && is_array($chequesExistentes[$indiceOriginal])
+                ? $chequesExistentes[$indiceOriginal]
+                : [];
+            $cheques[] = [
+                "fecha_cobro" => $fechaCheque,
+                "cobrado" => !empty($chequeExistente["cobrado"]),
+                "fecha_marcado_cobrado" => $chequeExistente["fecha_marcado_cobrado"] ?? "",
+                "usuario_cobrado" => $chequeExistente["usuario_cobrado"] ?? ""
+            ];
+        }
+    }
+    $hayFechaChequeNoFutura = false;
+    foreach ($cheques as $posicion => $cheque) {
+        $indiceOriginal = isset($indicesCheque[$posicion]) && preg_match('/^\d+$/', (string)$indicesCheque[$posicion])
+            ? intval($indicesCheque[$posicion])
+            : -1;
+        $fechaOriginal = $indiceOriginal >= 0 ? trim($chequesExistentes[$indiceOriginal]["fecha_cobro"] ?? "") : "";
+        $fechaCheque = trim($cheque["fecha_cobro"] ?? "");
+        if ($fechaCheque <= date("Y-m-d") && $fechaCheque !== $fechaOriginal) {
+            $hayFechaChequeNoFutura = true;
+            break;
+        }
+    }
 
     if (!in_array($tipoDePago, ["Pago único", "Cuota de acuerdo"], true)) {
         $errorPago = "Seleccioná un tipo de pago válido.";
@@ -766,6 +840,14 @@ if (isset($_POST["guardar_pago"])) {
         $errorPago = "El período seleccionado ya está cubierto por una cuota previa pagada.";
     } elseif (existePagoEmpresaTipoPeriodo($pagos, $empresaIdPago, $tipoPago, $periodo, $pagoIdActual)) {
         $errorPago = "Ya existe un pago cargado para esta empresa, este tipo y este período.";
+    } elseif ($formaPago === "Cheque" && count($cheques) < 1) {
+        $errorPago = "Ingresá al menos una fecha de cobro de cheque.";
+    } elseif ($formaPago === "Cheque" && count(array_filter($cheques, fn($cheque) => trim($cheque["fecha_cobro"] ?? "") === "")) > 0) {
+        $errorPago = "Todas las fechas de cobro de los cheques deben estar completas.";
+    } elseif ($formaPago === "Cheque" && count(array_filter($cheques, fn($cheque) => !fechaChequeValida($cheque["fecha_cobro"] ?? ""))) > 0) {
+        $errorPago = "Todas las fechas de cobro de los cheques deben ser válidas.";
+    } elseif ($formaPago === "Cheque" && $hayFechaChequeNoFutura) {
+        $errorPago = "Las fechas de cobro de los cheques deben ser futuras.";
     } elseif (!empty($_FILES["comprobante"]["name"])) {
         $ext = strtolower(pathinfo($_FILES["comprobante"]["name"], PATHINFO_EXTENSION));
         $permitidos = ["pdf", "jpg", "jpeg", "png"];
@@ -783,14 +865,6 @@ if (isset($_POST["guardar_pago"])) {
     }
 
     if ($errorPago === "") {
-        $pagoExistente = null;
-        foreach ($pagos as $pagoGuardado) {
-            if (($pagoGuardado["id"] ?? "") === $id) {
-                $pagoExistente = $pagoGuardado;
-                break;
-            }
-        }
-
         $nuevo = [
             "id" => $id,
             "empresa_id" => $_POST["empresa_id"] ?? "",
@@ -804,6 +878,10 @@ if (isset($_POST["guardar_pago"])) {
             "observaciones" => trim($_POST["observaciones_pago"] ?? ""),
             "fecha_carga" => date("Y-m-d H:i:s")
         ];
+
+        if ($formaPago === "Cheque") {
+            $nuevo["cheques"] = $cheques;
+        }
 
         foreach (["pago_tipo", "cuotas"] as $campoHistorico) {
             if (is_array($pagoExistente) && array_key_exists($campoHistorico, $pagoExistente)) {
@@ -829,9 +907,57 @@ if (isset($_POST["guardar_pago"])) {
             $editado ? "editar_pago" : "crear_pago",
             ($editado ? "Editó pago de " : "Cargó pago de ") . detallePago($nuevo, $empresas)
         );
+        if (!$editado && count($cheques) > 0) {
+            registrarAuditoria(
+                $auditoriaFile,
+                "crear_pago_cheques",
+                "Cargó pago con " . count($cheques) . " cheque(s) de " . detallePago($nuevo, $empresas)
+            );
+        } elseif ($editado && fechasCheques(chequesPago($pagoExistente)) !== fechasCheques($cheques)) {
+            registrarAuditoria(
+                $auditoriaFile,
+                "editar_fechas_cheques",
+                "Editó fechas de cobro de cheques de " . detallePago($nuevo, $empresas)
+            );
+        }
         header("Location: index.php");
         exit;
     }
+}
+
+if (isset($_POST["marcar_cheque_cobrado"])) {
+    $pagoIdCheque = trim($_POST["pago_id"] ?? "");
+    $indiceCheque = filter_var($_POST["cheque_indice"] ?? null, FILTER_VALIDATE_INT);
+    $empresaCheque = null;
+
+    if ($pagoIdCheque !== "" && $indiceCheque !== false && $indiceCheque >= 0) {
+        foreach ($pagos as $pagoIndice => $pago) {
+            if (($pago["id"] ?? "") !== $pagoIdCheque) continue;
+            if (!isset($pagos[$pagoIndice]["cheques"]) || !is_array($pagos[$pagoIndice]["cheques"])) break;
+            if (!isset($pagos[$pagoIndice]["cheques"][$indiceCheque]) || !is_array($pagos[$pagoIndice]["cheques"][$indiceCheque])) break;
+            if (!empty($pagos[$pagoIndice]["cheques"][$indiceCheque]["cobrado"])) break;
+
+            $pagos[$pagoIndice]["cheques"][$indiceCheque]["cobrado"] = true;
+            $pagos[$pagoIndice]["cheques"][$indiceCheque]["fecha_marcado_cobrado"] = date("Y-m-d H:i:s");
+            $pagos[$pagoIndice]["cheques"][$indiceCheque]["usuario_cobrado"] = usuarioActual();
+            $empresaCheque = buscarEmpresa($empresas, $pago["empresa_id"] ?? "");
+            $fechaChequeAuditada = $pagos[$pagoIndice]["cheques"][$indiceCheque]["fecha_cobro"] ?? "";
+            guardarJson($pagosFile, $pagos);
+            registrarAuditoria(
+                $auditoriaFile,
+                "marcar_cheque_cobrado",
+                usuarioActual() . " marcó como cobrado cheque con fecha " . fechaParaMostrar($fechaChequeAuditada) . " de " . ($empresaCheque["razon"] ?? "Empresa eliminada")
+            );
+            break;
+        }
+    }
+
+    $empresaIdDestino = trim($_POST["empresa_id_destino"] ?? "");
+    $destino = $empresaIdDestino !== ""
+        ? "index.php?ver_empresa=" . urlencode($empresaIdDestino) . "#buscar-empresa"
+        : "index.php";
+    header("Location: " . $destino);
+    exit;
 }
 
 if (isset($_GET["eliminar_empresa"])) {
@@ -969,7 +1095,8 @@ if ($errorPago !== "" && isset($_POST["guardar_pago"])) {
         "tipo_pago" => $_POST["tipo_pago"] ?? "",
         "periodo" => $_POST["periodo"] ?? "",
         "comprobante" => $_POST["comprobante_actual"] ?? "",
-        "observaciones" => $_POST["observaciones_pago"] ?? ""
+        "observaciones" => $_POST["observaciones_pago"] ?? "",
+        "cheques" => $cheques ?? []
     ];
 }
 
@@ -1017,7 +1144,39 @@ foreach ($empresas as $empresa) {
         }
     }
 }
-$tabInicial = $editarPago ? "cargar-pago" : ($editarEmpresa ? "nueva-empresa" : ((isset($_POST["guardar_acuerdo"]) && $errorEmpresa !== "") ? "cargar-acuerdo" : "inicio"));
+$chequesAlertas = [];
+$chequesVencenHoy = 0;
+$chequesVencidos = 0;
+foreach ($pagos as $pago) {
+    foreach (chequesPago($pago) as $indiceCheque => $cheque) {
+        if (!empty($cheque["cobrado"])) continue;
+        $estado = estadoCheque($cheque);
+        if ($estado !== "Vence hoy" && $estado !== "Vencido") continue;
+        $empresaCheque = buscarEmpresa($empresas, $pago["empresa_id"] ?? "");
+        $chequesAlertas[] = [
+            "pago_id" => $pago["id"] ?? "",
+            "cheque_indice" => $indiceCheque,
+            "empresa_id" => $pago["empresa_id"] ?? "",
+            "empresa" => $empresaCheque["razon"] ?? "Empresa eliminada",
+            "fecha_cobro" => $cheque["fecha_cobro"] ?? "",
+            "estado" => $estado
+        ];
+        if ($estado === "Vence hoy") {
+            $chequesVencenHoy++;
+        } else {
+            $chequesVencidos++;
+        }
+    }
+}
+usort($chequesAlertas, fn($a, $b) => strcmp($a["fecha_cobro"], $b["fecha_cobro"]));
+$cantidadAlertasCheques = count($chequesAlertas);
+$tabInicial = $editarPago
+    ? "cargar-pago"
+    : ($editarEmpresa
+        ? "nueva-empresa"
+        : (isset($_GET["ver_empresa"])
+            ? "buscar-empresa"
+            : ((isset($_POST["guardar_acuerdo"]) && $errorEmpresa !== "") ? "cargar-acuerdo" : "inicio")));
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -1031,6 +1190,14 @@ header h1{margin:0;font-size:24px}
 header a{color:white;text-decoration:none;font-weight:bold}
 .header-actions{display:flex;gap:12px;align-items:center}
 .usuario-header{font-weight:bold;color:#eaf7f0}
+.notificaciones{position:relative}
+.notificaciones-toggle{width:auto;background:#fff;color:#087a46;padding:8px 11px}
+.notificaciones-panel{display:none;position:absolute;right:0;top:calc(100% + 10px);width:min(380px,90vw);max-height:70vh;overflow:auto;background:white;color:#222;border-radius:12px;box-shadow:0 10px 30px #0004;padding:12px;z-index:30}
+.notificaciones.abierta .notificaciones-panel{display:block}
+.notificacion-cheque{padding:10px 0;border-bottom:1px solid #ddd}
+.notificacion-cheque:last-child{border-bottom:0}
+.notificacion-cheque form{margin-top:8px}
+.notificacion-cheque button{width:auto;padding:7px 10px}
 main{padding:20px}
 .tabs{display:flex;flex-wrap:wrap;gap:8px;background:white;padding:12px 20px;border-bottom:1px solid #dcefe6;position:sticky;top:0;z-index:5}
 .tab-btn{width:auto;background:#eaf7f0;color:#087a46;border:1px solid #b9dfcc;padding:10px 13px}
@@ -1058,7 +1225,7 @@ main{padding:20px}
 .card.is-collapsed .card-body{display:none}
 .quick-actions{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px}
 .quick-actions button{width:auto}
-.resumen{display:grid;grid-template-columns:repeat(5,1fr);gap:15px}
+.resumen{display:grid;grid-template-columns:repeat(6,1fr);gap:15px}
 .box{background:#eaf7f0;padding:18px;border-radius:14px}
 .label{font-size:14px;color:#555}
 .num{font-size:26px;font-weight:bold;color:#087a46;margin-top:5px}
@@ -1161,8 +1328,14 @@ th{background:#087a46;color:white}
 .empresa-coincidencia{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0;border-top:1px solid #0001}
 .empresa-coincidencia:first-of-type{border-top:0}
 .empresa-coincidencia button{width:auto;white-space:nowrap}
+.cheques-pago{margin-top:16px;padding:16px;border:1px solid #b9dfcc;border-radius:12px;background:#f7fbf9}
+.cheques-pago h3{margin:0 0 12px;color:#087a46}
+.cheques-fechas{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}
+.cheque-fecha-item{display:flex;gap:8px;align-items:end}
+.cheque-fecha-item .campo{flex:1}
+.quitar-cheque{width:auto;background:#b00020;padding:10px 12px}
 .fila-oculta{display:none}
-@media(max-width:1000px){.grid,.resumen,.home-actions,.empresa-ficha-grid,.filters-grid,.filters-grid.empresas,.filters-grid.informe,.filters-grid.auditoria,.informe-resumen,.resumen-acuerdo-grid{grid-template-columns:1fr}table{display:block;overflow-x:auto}}
+@media(max-width:1000px){.grid,.resumen,.home-actions,.empresa-ficha-grid,.cheques-fechas,.filters-grid,.filters-grid.empresas,.filters-grid.informe,.filters-grid.auditoria,.informe-resumen,.resumen-acuerdo-grid{grid-template-columns:1fr}table{display:block;overflow-x:auto}}
 </style>
 </head>
 <body>
@@ -1170,6 +1343,27 @@ th{background:#087a46;color:white}
 <header>
 <h1>Registro de Pagos - Empresas Deudoras</h1>
 <div class="header-actions">
+<div class="notificaciones" id="notificacionesCheques">
+<button type="button" class="notificaciones-toggle" id="notificacionesToggle" aria-expanded="false" aria-controls="notificacionesPanel">&#x1F514; <?= e($cantidadAlertasCheques) ?></button>
+<div class="notificaciones-panel" id="notificacionesPanel">
+<strong>Cheques por atender</strong>
+<?php if(empty($chequesAlertas)): ?>
+<p class="sin">No hay cheques vencidos ni que venzan hoy.</p>
+<?php endif; ?>
+<?php foreach($chequesAlertas as $alertaCheque): ?>
+<div class="notificacion-cheque">
+<div><strong><?= e($alertaCheque["empresa"]) ?></strong></div>
+<div><?= e(fechaParaMostrar($alertaCheque["fecha_cobro"])) ?></div>
+<div><span class="estado <?= $alertaCheque["estado"] === "Vencido" ? "estado-deudor" : "estado-parcial" ?>"><?= e($alertaCheque["estado"]) ?></span></div>
+<form method="post">
+<input type="hidden" name="pago_id" value="<?= e($alertaCheque["pago_id"]) ?>">
+<input type="hidden" name="cheque_indice" value="<?= e($alertaCheque["cheque_indice"]) ?>">
+<button name="marcar_cheque_cobrado" value="1">&#x2713; Marcar cobrado</button>
+</form>
+</div>
+<?php endforeach; ?>
+</div>
+</div>
 <span class="usuario-header">Usuario: <?= e(usuarioActual()) ?></span>
 <?php if ($esAdmin): ?>
 <a href="?backup=1">&#x2B07; Backup</a>
@@ -1203,6 +1397,7 @@ th{background:#087a46;color:white}
 <div class="box"><div class="label">Total cobrado este mes</div><div class="num"><?= dinero($totalCobradoEsteMes) ?></div></div>
 <div class="box"><div class="label">Total cobrado general</div><div class="num"><?= dinero($totalCobrado) ?></div></div>
 <div class="box"><div class="label">Deudores <?= e($periodoActual) ?></div><div class="num"><?= e($deudoresPeriodoActual) ?></div></div>
+<div class="box"><div class="label">Cheques pendientes</div><div>Vencen hoy: <strong><?= e($chequesVencenHoy) ?></strong></div><div>Vencidos: <strong><?= e($chequesVencidos) ?></strong></div></div>
 </div>
 
 <div class="card">
@@ -1353,6 +1548,30 @@ if ($advertenciaEmpresa) $empresasMostradas = $coincidenciasEmpresa["parecidas"]
 <div class="campo">
 <label for="pagoComprobante">Comprobante</label>
 <input type="file" id="pagoComprobante" name="comprobante" accept=".pdf,.jpg,.jpeg,.png">
+</div>
+</div>
+
+<?php
+$chequesFormulario = chequesPago($editarPago);
+$mostrarChequesFormulario = ($editarPago["forma_pago"] ?? "") === "Cheque";
+?>
+<div class="cheques-pago" id="bloqueChequesPago" style="<?= $mostrarChequesFormulario ? "" : "display:none" ?>">
+<h3>Fechas de cobro de cheques</h3>
+<div class="campo" style="max-width:240px">
+<label for="cantidadCheques">Cantidad de cheques</label>
+<input type="number" id="cantidadCheques" min="1" step="1" value="<?= e(max(count($chequesFormulario), 1)) ?>">
+</div>
+<div class="cheques-fechas" id="chequesFechas">
+<?php foreach($chequesFormulario as $indiceCheque => $cheque): ?>
+<div class="cheque-fecha-item">
+<div class="campo">
+<label>Cheque <?= e($indiceCheque + 1) ?> - Fecha de cobro</label>
+<input type="date" name="cheque_fecha[]" value="<?= e($cheque["fecha_cobro"] ?? "") ?>" data-original="<?= e($cheque["fecha_cobro"] ?? "") ?>">
+<input type="hidden" name="cheque_indice[]" value="<?= e($indiceCheque) ?>">
+</div>
+<button type="button" class="quitar-cheque" title="Quitar fecha" aria-label="Quitar fecha">&times;</button>
+</div>
+<?php endforeach; ?>
 </div>
 </div>
 
@@ -1747,13 +1966,14 @@ $categoriaMutual = ($deudaMutual > 0 || $pagadoMutual > 0) ? "1" : "0";
 <?php foreach(array_reverse($pagos) as $p):
 $emp = buscarEmpresa($empresas, $p["empresa_id"] ?? "");
 $periodoPago = periodoParaInput($p["periodo"] ?? "");
+$cantidadChequesPago = count(chequesPago($p));
 ?>
 <tr class="fila-pago" data-busqueda="<?= e(($emp["razon"] ?? "Empresa eliminada") . " " . ($emp["cuit"] ?? "")) ?>" data-tipo="<?= e($p["tipo"] ?? "") ?>" data-forma="<?= e($p["forma_pago"] ?? "") ?>" data-periodo="<?= e($periodoPago) ?>">
 <td><?= e($p["fecha"] ?? "") ?></td>
 <td><?= e($emp["razon"] ?? "Empresa eliminada") ?></td>
 <td><?= e($emp["cuit"] ?? "") ?></td>
 <td><span class="badge"><?= e($p["tipo"] ?? "") ?></span></td>
-<td><?= e($p["forma_pago"] ?? "") ?></td>
+<td><?= e((($p["forma_pago"] ?? "") ?: ($cantidadChequesPago > 0 ? "Cheque" : "")) . ($cantidadChequesPago > 0 ? " (" . $cantidadChequesPago . ")" : "")) ?></td>
 <td><?= e($periodoPago) ?></td>
 <td><?= dinero($p["monto"] ?? 0) ?></td>
 <td>
@@ -1804,6 +2024,9 @@ $periodoPago = periodoParaInput($p["periodo"] ?? "");
 <option value="eliminar_acuerdo">Eliminar acuerdo</option>
 <option value="crear_pago">Crear pago</option>
 <option value="editar_pago">Editar pago</option>
+<option value="crear_pago_cheques">Crear pago con cheques</option>
+<option value="editar_fechas_cheques">Editar fechas de cheques</option>
+<option value="marcar_cheque_cobrado">Marcar cheque cobrado</option>
 <option value="eliminar_pago">Eliminar pago</option>
 <option value="descargar_backup">Descargar backup</option>
 </select>
@@ -1850,6 +2073,19 @@ const empresasData = <?= json_encode($empresas, JSON_UNESCAPED_UNICODE | JSON_UN
 const pagosData = <?= json_encode($pagos, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
 const tiposInforme = ["Obra Social", "Sindicato", "Mutual"];
 const tabInicial = <?= json_encode($tabInicial, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
+
+const notificacionesCheques = document.getElementById("notificacionesCheques");
+const notificacionesToggle = document.getElementById("notificacionesToggle");
+notificacionesToggle?.addEventListener("click", () => {
+    const abierta = notificacionesCheques?.classList.toggle("abierta") || false;
+    notificacionesToggle.setAttribute("aria-expanded", abierta ? "true" : "false");
+});
+document.addEventListener("click", (event) => {
+    if (notificacionesCheques && !notificacionesCheques.contains(event.target)) {
+        notificacionesCheques.classList.remove("abierta");
+        notificacionesToggle?.setAttribute("aria-expanded", "false");
+    }
+});
 
 function formatearPeriodo(valor) {
     const numeros = (valor || "").replace(/\D/g, "").slice(0, 4);
@@ -2006,9 +2242,77 @@ if (pagoForm) {
     const periodoInput = pagoForm.querySelector('input[name="periodo"]');
     const pagoIdInput = pagoForm.querySelector('input[name="pago_id"]');
     const montoInput = pagoForm.querySelector('input[name="monto"]');
+    const formaPagoInput = pagoForm.querySelector('select[name="forma_pago"]');
+    const bloqueCheques = document.getElementById("bloqueChequesPago");
+    const cantidadChequesInput = document.getElementById("cantidadCheques");
+    const chequesFechas = document.getElementById("chequesFechas");
     const avisoDuplicado = document.getElementById("avisoPagoDuplicado");
     const resumenAcuerdo = document.getElementById("resumenAcuerdoPago");
     let claveDuplicadaAvisada = "";
+
+    const crearFilaCheque = () => {
+        const fila = document.createElement("div");
+        fila.className = "cheque-fecha-item";
+        fila.innerHTML = `<div class="campo">
+            <label>Fecha de cobro</label>
+            <input type="date" name="cheque_fecha[]" data-original="">
+            <input type="hidden" name="cheque_indice[]" value="">
+        </div>
+        <button type="button" class="quitar-cheque" title="Quitar fecha" aria-label="Quitar fecha">&times;</button>`;
+        return fila;
+    };
+
+    const actualizarFilasCheques = () => {
+        if (!chequesFechas) return;
+        const filas = Array.from(chequesFechas.querySelectorAll(".cheque-fecha-item"));
+        filas.forEach((fila, indice) => {
+            const label = fila.querySelector("label");
+            const fecha = fila.querySelector('input[name="cheque_fecha[]"]');
+            if (label) label.textContent = `Cheque ${indice + 1} - Fecha de cobro`;
+            if (fecha) fecha.required = formaPagoInput?.value === "Cheque";
+        });
+        if (cantidadChequesInput) cantidadChequesInput.value = String(filas.length);
+    };
+
+    const ajustarCantidadCheques = () => {
+        if (!chequesFechas || !cantidadChequesInput) return;
+        const cantidad = Math.max(Number.parseInt(cantidadChequesInput.value || "1", 10) || 1, 1);
+        let filas = Array.from(chequesFechas.querySelectorAll(".cheque-fecha-item"));
+        while (filas.length < cantidad) {
+            chequesFechas.appendChild(crearFilaCheque());
+            filas = Array.from(chequesFechas.querySelectorAll(".cheque-fecha-item"));
+        }
+        while (filas.length > cantidad) {
+            filas.pop()?.remove();
+        }
+        actualizarFilasCheques();
+    };
+
+    const actualizarVisibilidadCheques = () => {
+        const esCheque = formaPagoInput?.value === "Cheque";
+        if (bloqueCheques) bloqueCheques.style.display = esCheque ? "" : "none";
+        if (esCheque && chequesFechas && !chequesFechas.querySelector(".cheque-fecha-item")) {
+            ajustarCantidadCheques();
+        }
+        chequesFechas?.querySelectorAll('input[name="cheque_fecha[]"]').forEach((input) => {
+            input.required = esCheque;
+        });
+    };
+
+    cantidadChequesInput?.addEventListener("change", ajustarCantidadCheques);
+    formaPagoInput?.addEventListener("change", actualizarVisibilidadCheques);
+    chequesFechas?.addEventListener("click", (event) => {
+        const boton = event.target.closest(".quitar-cheque");
+        if (!boton) return;
+        boton.closest(".cheque-fecha-item")?.remove();
+        if (!chequesFechas.querySelector(".cheque-fecha-item")) {
+            chequesFechas.appendChild(crearFilaCheque());
+        }
+        actualizarFilasCheques();
+    });
+    if (chequesFechas && !chequesFechas.querySelector(".cheque-fecha-item")) ajustarCantidadCheques();
+    actualizarFilasCheques();
+    actualizarVisibilidadCheques();
 
     const renderResumenAcuerdoPago = () => {
         const empresaId = empresaIdInput?.value || "";
@@ -2147,6 +2451,24 @@ if (pagoForm) {
             alert("El periodo debe tener formato MM/AA.");
             periodo.focus();
             return;
+        }
+        if (formaPagoInput?.value === "Cheque") {
+            const fechas = Array.from(chequesFechas?.querySelectorAll('input[name="cheque_fecha[]"]') || []);
+            const ahora = new Date();
+            const hoy = `${ahora.getFullYear()}-${String(ahora.getMonth() + 1).padStart(2, "0")}-${String(ahora.getDate()).padStart(2, "0")}`;
+            if (!fechas.length || fechas.some((input) => !input.value)) {
+                event.preventDefault();
+                alert("Todas las fechas de cobro de los cheques deben estar completas.");
+                fechas.find((input) => !input.value)?.focus();
+                return;
+            }
+            const fechaNoFutura = fechas.find((input) => input.value <= hoy && input.value !== (input.dataset.original || ""));
+            if (fechaNoFutura) {
+                event.preventDefault();
+                alert("Las fechas de cobro de los cheques deben ser futuras.");
+                fechaNoFutura.focus();
+                return;
+            }
         }
         if (tipoPago === "Cuota de acuerdo") {
             const empresa = obtenerEmpresa(empresaId);
@@ -2868,6 +3190,27 @@ function resumenDetalleAcuerdo(empresa, tipo) {
 </div>`;
 }
 
+function fechaChequeMostrar(fecha) {
+    const partes = (fecha || "").split("-");
+    return partes.length === 3 ? `${partes[2]}/${partes[1]}/${partes[0]}` : (fecha || "");
+}
+
+function estadoChequeCliente(cheque) {
+    if (cheque?.cobrado) return "Cobrado";
+    const ahora = new Date();
+    const hoy = `${ahora.getFullYear()}-${String(ahora.getMonth() + 1).padStart(2, "0")}-${String(ahora.getDate()).padStart(2, "0")}`;
+    const fecha = cheque?.fecha_cobro || "";
+    if (fecha === hoy) return "Vence hoy";
+    if (fecha && fecha < hoy) return "Vencido";
+    return "Pendiente";
+}
+
+function formaPagoConCheques(pago) {
+    const cantidad = Array.isArray(pago?.cheques) ? pago.cheques.length : 0;
+    const forma = pago?.forma_pago || (cantidad ? "Cheque" : "");
+    return `${forma}${cantidad ? ` (${cantidad})` : ""}`;
+}
+
 function seleccionarEmpresaFicha(empresaId) {
     const empresa = obtenerEmpresa(empresaId);
     const ficha = document.getElementById("fichaEmpresa");
@@ -2878,6 +3221,14 @@ function seleccionarEmpresaFicha(empresaId) {
     });
 
     const pagosEmpresa = pagosData.filter((pago) => (pago.empresa_id || "") === (empresa.id || ""));
+    const chequesEmpresa = pagosEmpresa.flatMap((pago) =>
+        (Array.isArray(pago.cheques) ? pago.cheques : []).map((cheque, indice) => ({
+            pago,
+            cheque,
+            indice,
+            estado: estadoChequeCliente(cheque)
+        }))
+    ).sort((a, b) => (a.cheque.fecha_cobro || "").localeCompare(b.cheque.fecha_cobro || ""));
     const totalGeneral = pagosEmpresa.reduce((total, pago) => total + (Number(pago.monto) || 0), 0);
     const totalPorTipo = (tipo) => pagosEmpresa
         .filter((pago) => (pago.tipo || "") === tipo)
@@ -2911,8 +3262,16 @@ ${saldos.map((s) => `<div class="box"><div class="label">${escapeHtml(s.tipo)}</
 <h3 class="mini-title">Acuerdos vigentes</h3>
 <p>${tiposInforme.map((tipo) => escapeHtml(renderAcuerdoResumen(empresa, tipo))).join("<br>")}</p>
 <div class="empresa-ficha-grid">${tiposInforme.map((tipo) => resumenDetalleAcuerdo(empresa, tipo)).join("")}</div>
+<h3 class="mini-title">Cheques pendientes</h3>
+${chequesEmpresa.length ? `<table><thead><tr><th>Fecha de cobro</th><th>Estado</th><th>Acción</th></tr></thead><tbody>${chequesEmpresa.map((item) => {
+    const clase = item.estado === "Cobrado" ? "estado-ok" : (item.estado === "Vencido" ? "estado-deudor" : (item.estado === "Vence hoy" ? "estado-parcial" : "estado-previa"));
+    const accion = item.estado === "Cobrado"
+        ? `<span class="sin">Cobrado por ${escapeHtml(item.cheque.usuario_cobrado || "")}</span>`
+        : `<form method="post"><input type="hidden" name="pago_id" value="${escapeHtml(item.pago.id || "")}"><input type="hidden" name="cheque_indice" value="${item.indice}"><input type="hidden" name="empresa_id_destino" value="${escapeHtml(empresa.id || "")}"><button name="marcar_cheque_cobrado" value="1" class="btn-small">&#x2713; Marcar cobrado</button></form>`;
+    return `<tr><td>${escapeHtml(fechaChequeMostrar(item.cheque.fecha_cobro || ""))}</td><td><span class="estado ${clase}">${escapeHtml(item.estado)}</span></td><td>${accion}</td></tr>`;
+}).join("")}</tbody></table>` : '<p class="sin">Sin cheques registrados.</p>'}
 <h3 class="mini-title">Pagos registrados</h3>
-${pagosEmpresa.length ? `<table><thead><tr><th>Fecha</th><th>Tipo</th><th>Período</th><th>Monto</th><th>Forma</th><th>Acciones</th></tr></thead><tbody>${pagosEmpresa.map((pago) => `<tr><td>${escapeHtml(pago.fecha || "")}</td><td>${escapeHtml(pago.tipo || "")}</td><td>${escapeHtml(periodoNormalizado(pago.periodo || ""))}</td><td>${dineroCliente(pago.monto)}</td><td>${escapeHtml(pago.forma_pago || "")}</td><td><a class="btn-danger" href="?eliminar_pago=${encodeURIComponent(pago.id || "")}" onclick="return confirm('¿Eliminar este pago? Esta acción no elimina la empresa.')" title="Eliminar pago" aria-label="Eliminar pago">🗑️</a></td></tr>`).join("")}</tbody></table>` : '<p class="sin">Sin pagos registrados.</p>'}
+${pagosEmpresa.length ? `<table><thead><tr><th>Fecha</th><th>Tipo</th><th>Período</th><th>Monto</th><th>Forma</th><th>Acciones</th></tr></thead><tbody>${pagosEmpresa.map((pago) => `<tr><td>${escapeHtml(pago.fecha || "")}</td><td>${escapeHtml(pago.tipo || "")}</td><td>${escapeHtml(periodoNormalizado(pago.periodo || ""))}</td><td>${dineroCliente(pago.monto)}</td><td>${escapeHtml(formaPagoConCheques(pago))}</td><td><a class="btn-danger" href="?eliminar_pago=${encodeURIComponent(pago.id || "")}" onclick="return confirm('¿Eliminar este pago? Esta acción no elimina la empresa.')" title="Eliminar pago" aria-label="Eliminar pago">🗑️</a></td></tr>`).join("")}</tbody></table>` : '<p class="sin">Sin pagos registrados.</p>'}
 <br>
 <a class="btn-secundario" href="?editar_empresa=${encodeURIComponent(empresa.id || "")}">Editar empresa</a>
 ${empresaActivaCliente(empresa) ? `<a class="btn-danger" href="?eliminar_empresa=${encodeURIComponent(empresa.id || "")}" onclick="return confirm('La empresa quedará inactiva y sus pagos se conservarán. ¿Dar de baja empresa?')" title="Dar de baja empresa" aria-label="Dar de baja empresa">🗑️</a>` : ""}
@@ -3306,6 +3665,8 @@ configurarInformePeriodo();
 configurarFiltrosEmpresas();
 configurarFiltrosPagos();
 configurarFiltrosAuditoria();
+const empresaFichaInicial = <?= json_encode($_GET["ver_empresa"] ?? "", JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
+if (empresaFichaInicial) seleccionarEmpresaFicha(empresaFichaInicial);
 </script>
 </body>
 </html>
