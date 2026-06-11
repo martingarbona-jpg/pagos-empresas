@@ -267,14 +267,15 @@ function buscarCoincidenciasEmpresa($empresas, $razon, $cuit, $idIgnorado = "") 
     return $resultado;
 }
 
-function existePagoEmpresaTipoPeriodo($pagos, $empresaId, $tipo, $periodo, $pagoIdIgnorado = "") {
+function existePagoEmpresaTipoPeriodoTipoPago($pagos, $empresas, $empresaId, $tipo, $periodo, $tipoPago, $pagoIdIgnorado = "") {
     $periodoNormalizado = periodoParaInput($periodo);
     foreach ($pagos as $pago) {
         if ($pagoIdIgnorado !== "" && ($pago["id"] ?? "") === $pagoIdIgnorado) continue;
         if (
             ($pago["empresa_id"] ?? "") === $empresaId &&
             ($pago["tipo"] ?? "") === $tipo &&
-            periodoParaInput($pago["periodo"] ?? "") === $periodoNormalizado
+            periodoParaInput($pago["periodo"] ?? "") === $periodoNormalizado &&
+            tipoPagoCompatible($pago, $empresas) === $tipoPago
         ) {
             return true;
         }
@@ -292,20 +293,46 @@ function totalPagado($pagos, $empresaId, $tipo) {
     return $total;
 }
 
+function pagosPreviosIdsAcuerdo($acuerdo) {
+    $ids = $acuerdo["pagos_previos_ids"] ?? [];
+    if (!is_array($ids)) return [];
+    return array_values(array_unique(array_filter(array_map("strval", $ids), fn($id) => $id !== "")));
+}
+
+function pagosPreviosVinculados($acuerdo, $pagos, $empresaId, $tipo) {
+    $ids = array_flip(pagosPreviosIdsAcuerdo($acuerdo));
+    if (!$ids) return [];
+    return array_values(array_filter($pagos, fn($pago) =>
+        isset($ids[(string)($pago["id"] ?? "")]) &&
+        ($pago["empresa_id"] ?? "") === $empresaId &&
+        ($pago["tipo"] ?? "") === $tipo
+    ));
+}
+
+function pagoVinculadoComoPrevio($pago, $empresa) {
+    $tipo = $pago["tipo"] ?? "";
+    if ($tipo === "") return false;
+    return in_array((string)($pago["id"] ?? ""), pagosPreviosIdsAcuerdo(acuerdoEmpresa($empresa, $tipo)), true);
+}
+
 function resumenFinancieroEmpresaTipo($empresa, $tipo, $pagos) {
     $tieneAcuerdo = acuerdoValidoEmpresaTipo($empresa, $tipo);
     $acuerdo = acuerdoEmpresa($empresa, $tipo);
     $pagosRegistrados = totalPagado($pagos, $empresa["id"] ?? "", $tipo);
     $montoCuota = $tieneAcuerdo ? max(floatval($acuerdo["monto_cuota"] ?? 0), 0) : 0;
     $cuotasPrevias = $tieneAcuerdo ? max(intval($acuerdo["cuotas_pagadas_previas"] ?? 0), 0) : 0;
+    $pagosPrevios = $tieneAcuerdo ? pagosPreviosVinculados($acuerdo, $pagos, $empresa["id"] ?? "", $tipo) : [];
+    $cuotasPreviasSinRegistro = max($cuotasPrevias - count($pagosPrevios), 0);
     $deuda = $tieneAcuerdo ? max(floatval($acuerdo["monto_total"] ?? 0), 0) : 0;
-    $cobrado = $pagosRegistrados + ($cuotasPrevias * $montoCuota);
+    $cobrado = $pagosRegistrados + ($cuotasPreviasSinRegistro * $montoCuota);
 
     return [
         "tiene_acuerdo" => $tieneAcuerdo,
         "deuda" => $deuda,
         "cobrado" => $cobrado,
-        "saldo" => max($deuda - $cobrado, 0)
+        "saldo" => max($deuda - $cobrado, 0),
+        "pagos_previos_vinculados" => count($pagosPrevios),
+        "cuotas_previas_sin_registro" => $cuotasPreviasSinRegistro
     ];
 }
 
@@ -401,6 +428,7 @@ function acuerdoDefault() {
         "cantidad_cuotas" => 1,
         "monto_cuota" => 0,
         "cuotas_pagadas_previas" => 0,
+        "pagos_previos_ids" => [],
         "periodo_desde" => "",
         "periodo_hasta" => "",
         "observaciones" => ""
@@ -455,14 +483,17 @@ function periodoEsCuotaPrevia($acuerdo, $periodo) {
 }
 
 function tipoPagoCompatible($pago, $empresas) {
-    if (in_array($pago["tipo_pago"] ?? "", ["Pago único", "Cuota de acuerdo"], true)) {
+    if (in_array($pago["tipo_pago"] ?? "", ["Pago al día", "Cuota de acuerdo", "Pago único / extraordinario"], true)) {
         return $pago["tipo_pago"];
+    }
+    if (($pago["tipo_pago"] ?? "") === "Pago único") {
+        return "Pago único / extraordinario";
     }
     if (($pago["pago_tipo"] ?? "") === "Cuotas") {
         return "Cuota de acuerdo";
     }
     if (($pago["pago_tipo"] ?? "") === "Pago total") {
-        return "Pago único";
+        return "Pago único / extraordinario";
     }
     $empresa = buscarEmpresa($empresas, $pago["empresa_id"] ?? "");
     if ($empresa && acuerdoValidoEmpresaTipo($empresa, $pago["tipo"] ?? "")) {
@@ -471,7 +502,7 @@ function tipoPagoCompatible($pago, $empresas) {
             return "Cuota de acuerdo";
         }
     }
-    return "Pago único";
+    return "Pago único / extraordinario";
 }
 
 function resumenAcuerdosEmpresa($empresa) {
@@ -515,6 +546,7 @@ if (!isset($_SESSION["auth_pagos_empresas"]) || usuarioActual() === "") {
 <html lang="es">
 <head>
 <meta charset="UTF-8">
+<link rel="icon" type="image/png" href="favicon.png?v=<?php echo time(); ?>">
 <title>Pagos Empresas</title>
 <style>
 body{margin:0;font-family:Arial;background:#f3f6f4;display:flex;align-items:center;justify-content:center;height:100vh}
@@ -585,6 +617,7 @@ if (isset($_GET["exportar"]) && $_GET["exportar"] === "pagos") {
             $empresa["razon"] ?? "Empresa eliminada",
             $empresa["cuit"] ?? "",
             $pago["tipo"] ?? "",
+            tipoPagoCompatible($pago, $empresas),
             periodoParaInput($pago["periodo"] ?? ""),
             $pago["fecha"] ?? "",
             $pago["forma_pago"] ?? "",
@@ -592,7 +625,7 @@ if (isset($_GET["exportar"]) && $_GET["exportar"] === "pagos") {
             $pago["observaciones"] ?? ""
         ];
     }
-    enviarCsv("pagos_registrados_" . date("Y-m-d_H-i") . ".csv", ["Empresa", "CUIT", "Tipo", "Periodo", "Fecha de pago", "Forma de pago", "Monto", "Observaciones"], $filas);
+    enviarCsv("pagos_registrados_" . date("Y-m-d_H-i") . ".csv", ["Empresa", "CUIT", "Tipo", "Tipo de pago", "Periodo", "Fecha de pago", "Forma de pago", "Monto", "Observaciones"], $filas);
 }
 
 if (isset($_GET["exportar"]) && $_GET["exportar"] === "informe") {
@@ -605,46 +638,67 @@ if (isset($_GET["exportar"]) && $_GET["exportar"] === "informe") {
         foreach ($empresas as $empresa) {
             if (!empresaActiva($empresa)) continue;
             foreach ($tiposExport as $tipo) {
-                $esperado = 0;
-                $estado = "";
                 $acuerdo = acuerdoEmpresa($empresa, $tipo);
-                if (acuerdoValidoEmpresaTipo($empresa, $tipo) && periodoPerteneceAcuerdo($acuerdo, $periodoExport)) {
-                    $esperado = floatval($acuerdo["monto_cuota"] ?? 0);
-                    $estado = periodoEsCuotaPrevia($acuerdo, $periodoExport) ? "PAGADA PREVIA" : "PENDIENTE";
-                }
-
                 $pagosPeriodo = array_values(array_filter($pagos, fn($p) =>
                     ($p["empresa_id"] ?? "") === ($empresa["id"] ?? "") &&
                     ($p["tipo"] ?? "") === $tipo &&
                     periodoParaInput($p["periodo"] ?? "") === $periodoExport
                 ));
-                $pagado = array_reduce($pagosPeriodo, fn($total, $p) => $total + floatval($p["monto"] ?? 0), 0);
-
-                if ($esperado <= 0 && $pagado <= 0) continue;
-                if ($pagado > 0) {
-                    $estado = $esperado <= 0 ? "EXTRA" : ($pagado >= $esperado ? "AL DIA" : "PARCIAL");
+                $pagosPorTipo = [];
+                foreach ($pagosPeriodo as $pagoPeriodo) {
+                    $categoria = tipoPagoCompatible($pagoPeriodo, $empresas);
+                    $pagosPorTipo[$categoria][] = $pagoPeriodo;
                 }
-                $pendiente = max($esperado - $pagado, 0);
-                if ($estado === "PAGADA PREVIA") $pendiente = 0;
 
-                $filas[] = [
-                    $empresa["razon"] ?? "",
-                    $empresa["cuit"] ?? "",
-                    $tipo,
-                    $periodoExport,
-                    implode(", ", array_filter(array_map(fn($p) => $p["fecha"] ?? "", $pagosPeriodo))),
-                    implode(", ", array_filter(array_map(fn($p) => $p["forma_pago"] ?? "", $pagosPeriodo))),
-                    $pagado,
-                    implode(" | ", array_filter(array_map(fn($p) => $p["observaciones"] ?? "", $pagosPeriodo))),
-                    $estado,
-                    $esperado,
-                    $pendiente
-                ];
+                foreach (["Pago al día", "Cuota de acuerdo", "Pago único / extraordinario"] as $categoria) {
+                    $pagosCategoria = $pagosPorTipo[$categoria] ?? [];
+                    $esCuota = $categoria === "Cuota de acuerdo";
+                    $aplicaAcuerdo = $esCuota && acuerdoValidoEmpresaTipo($empresa, $tipo) && periodoPerteneceAcuerdo($acuerdo, $periodoExport);
+                    if ($categoria === "Pago único / extraordinario" && !$pagosCategoria) continue;
+                    if ($esCuota && !$aplicaAcuerdo && !$pagosCategoria) continue;
+
+                    $esperado = $aplicaAcuerdo ? floatval($acuerdo["monto_cuota"] ?? 0) : 0;
+                    $pagado = array_reduce($pagosCategoria, fn($total, $p) => $total + floatval($p["monto"] ?? 0), 0);
+                    $idsPrevios = array_flip(pagosPreviosIdsAcuerdo($acuerdo));
+                    $tienePagoPrevioVinculado = $esCuota && count(array_filter($pagosCategoria, fn($p) => isset($idsPrevios[(string)($p["id"] ?? "")]))) > 0;
+
+                    if ($categoria === "Pago al día") {
+                        $estado = $pagosCategoria ? "PAGADO AL DÍA" : "PENDIENTE PAGO AL DÍA";
+                    } elseif ($categoria === "Pago único / extraordinario") {
+                        $estado = "PAGO EXTRAORDINARIO";
+                    } elseif ($tienePagoPrevioVinculado) {
+                        $estado = "PAGADA PREVIA REGISTRADA";
+                    } elseif ($pagosCategoria) {
+                        $estado = "CUOTA DE ACUERDO PAGADA";
+                    } elseif (periodoEsCuotaPrevia($acuerdo, $periodoExport)) {
+                        $estado = "PAGADA PREVIA";
+                    } else {
+                        $estado = "CUOTA DE ACUERDO PENDIENTE";
+                    }
+
+                    $pendiente = $esCuota && !in_array($estado, ["PAGADA PREVIA", "PAGADA PREVIA REGISTRADA"], true)
+                        ? max($esperado - $pagado, 0)
+                        : 0;
+                    $filas[] = [
+                        $empresa["razon"] ?? "",
+                        $empresa["cuit"] ?? "",
+                        $tipo,
+                        $categoria,
+                        $periodoExport,
+                        implode(", ", array_filter(array_map(fn($p) => $p["fecha"] ?? "", $pagosCategoria))),
+                        implode(", ", array_filter(array_map(fn($p) => $p["forma_pago"] ?? "", $pagosCategoria))),
+                        $pagado,
+                        implode(" | ", array_filter(array_map(fn($p) => $p["observaciones"] ?? "", $pagosCategoria))),
+                        $estado,
+                        $esperado,
+                        $pendiente
+                    ];
+                }
             }
         }
     }
 
-    enviarCsv("informe_periodo_" . ($periodoExport ? str_replace("/", "-", $periodoExport) : date("Y-m-d")) . ".csv", ["Empresa", "CUIT", "Tipo", "Periodo", "Fecha de pago", "Forma de pago", "Monto", "Observaciones", "Estado", "Cuota esperada", "Pendiente"], $filas);
+    enviarCsv("informe_periodo_" . ($periodoExport ? str_replace("/", "-", $periodoExport) : date("Y-m-d")) . ".csv", ["Empresa", "CUIT", "Tipo", "Tipo de pago", "Periodo", "Fecha de pago", "Forma de pago", "Monto", "Observaciones", "Estado", "Cuota esperada", "Pendiente"], $filas);
 }
 
 if (isset($_POST["guardar_empresa"])) {
@@ -712,8 +766,18 @@ if (isset($_POST["guardar_acuerdo"])) {
     $cantidadCuotasAcuerdo = intval($_POST["acuerdo_cantidad_cuotas"] ?? 2);
     $montoCuotaAcuerdo = floatval($_POST["acuerdo_monto_cuota"] ?? 0);
     $cuotasPreviasAcuerdo = intval($_POST["acuerdo_cuotas_pagadas_previas"] ?? 0);
+    $pagosPreviosIdsAcuerdo = $_POST["pagos_previos_ids"] ?? [];
+    $pagosPreviosIdsAcuerdo = is_array($pagosPreviosIdsAcuerdo)
+        ? array_values(array_unique(array_filter(array_map("strval", $pagosPreviosIdsAcuerdo), fn($id) => $id !== "")))
+        : [];
     $periodoDesdeAcuerdo = trim($_POST["acuerdo_periodo_desde"] ?? "");
     $periodoHastaAcuerdo = trim($_POST["acuerdo_periodo_hasta"] ?? "");
+    $pagosPreviosValidos = pagosPreviosVinculados(
+        ["pagos_previos_ids" => $pagosPreviosIdsAcuerdo],
+        $pagos,
+        $empresaIdAcuerdo,
+        $tipoAcuerdo
+    );
 
     if ($empresaIdAcuerdo === "") {
         $errorEmpresa = "Seleccioná una empresa para cargar el acuerdo.";
@@ -729,6 +793,10 @@ if (isset($_POST["guardar_acuerdo"])) {
         $errorEmpresa = "Las cuotas ya pagadas no pueden ser negativas.";
     } elseif ($cuotasPreviasAcuerdo >= $cantidadCuotasAcuerdo) {
         $errorEmpresa = "Las cuotas previas ya pagadas deben ser menores que la cantidad total de cuotas.";
+    } elseif (count($pagosPreviosIdsAcuerdo) > $cuotasPreviasAcuerdo) {
+        $errorEmpresa = "Los pagos previos vinculados no pueden superar las cuotas previas declaradas.";
+    } elseif (count($pagosPreviosValidos) !== count($pagosPreviosIdsAcuerdo)) {
+        $errorEmpresa = "Solo se pueden vincular pagos existentes de la misma empresa y tipo.";
     } elseif ($periodoDesdeAcuerdo === "") {
         $errorEmpresa = "El período es obligatorio.";
     } elseif ($periodoHastaAcuerdo === "") {
@@ -756,6 +824,7 @@ if (isset($_POST["guardar_acuerdo"])) {
                     "cantidad_cuotas" => $cantidadCuotasAcuerdo,
                     "monto_cuota" => $montoCuotaAcuerdo,
                     "cuotas_pagadas_previas" => $cuotasPreviasAcuerdo,
+                    "pagos_previos_ids" => $pagosPreviosIdsAcuerdo,
                     "periodo_desde" => $periodoDesdeAcuerdo,
                     "periodo_hasta" => $periodoHastaAcuerdo,
                     "observaciones" => trim($_POST["acuerdo_observaciones"] ?? "")
@@ -768,7 +837,7 @@ if (isset($_POST["guardar_acuerdo"])) {
         registrarAuditoria(
             $auditoriaFile,
             $acuerdoEditado ? "editar_acuerdo" : "crear_acuerdo",
-            ($acuerdoEditado ? "Editó acuerdo de " : "Creó acuerdo de ") . (($empresaAuditada["razon"] ?? "Empresa") . " - " . $tipoAcuerdo . " - " . $periodoDesdeAcuerdo . " a " . $periodoHastaAcuerdo . " - " . dinero($montoTotalAcuerdo))
+            ($acuerdoEditado ? "Editó acuerdo de " : "Creó acuerdo de ") . (($empresaAuditada["razon"] ?? "Empresa") . " - " . $tipoAcuerdo . " - " . $periodoDesdeAcuerdo . " a " . $periodoHastaAcuerdo . " - " . dinero($montoTotalAcuerdo) . " - pagos previos vinculados: " . count($pagosPreviosIdsAcuerdo))
         );
         header("Location: index.php#cargar-acuerdo");
         exit;
@@ -828,7 +897,7 @@ if (isset($_POST["guardar_pago"])) {
         }
     }
 
-    if (!in_array($tipoDePago, ["Pago único", "Cuota de acuerdo"], true)) {
+    if (!in_array($tipoDePago, ["Pago al día", "Cuota de acuerdo", "Pago único / extraordinario"], true)) {
         $errorPago = "Seleccioná un tipo de pago válido.";
     } elseif (!periodoValido($periodo)) {
         $errorPago = "El periodo debe tener formato MM/AA.";
@@ -838,8 +907,8 @@ if (isset($_POST["guardar_pago"])) {
         $errorPago = "El período seleccionado no pertenece al acuerdo.";
     } elseif ($tipoDePago === "Cuota de acuerdo" && periodoEsCuotaPrevia(acuerdoEmpresa($empresaPago, $tipoPago), $periodo)) {
         $errorPago = "El período seleccionado ya está cubierto por una cuota previa pagada.";
-    } elseif (existePagoEmpresaTipoPeriodo($pagos, $empresaIdPago, $tipoPago, $periodo, $pagoIdActual)) {
-        $errorPago = "Ya existe un pago cargado para esta empresa, este tipo y este período.";
+    } elseif (existePagoEmpresaTipoPeriodoTipoPago($pagos, $empresas, $empresaIdPago, $tipoPago, $periodo, $tipoDePago, $pagoIdActual)) {
+        $errorPago = "Ya existe un pago cargado para esta empresa, este tipo, este período y este tipo de pago.";
     } elseif ($formaPago === "Cheque" && count($cheques) < 1) {
         $errorPago = "Ingresá al menos una fecha de cobro de cheque.";
     } elseif ($formaPago === "Cheque" && count(array_filter($cheques, fn($cheque) => trim($cheque["fecha_cobro"] ?? "") === "")) > 0) {
@@ -905,7 +974,7 @@ if (isset($_POST["guardar_pago"])) {
         registrarAuditoria(
             $auditoriaFile,
             $editado ? "editar_pago" : "crear_pago",
-            ($editado ? "Editó pago de " : "Cargó pago de ") . detallePago($nuevo, $empresas)
+            ($editado ? "Editó pago de " : "Cargó pago de ") . detallePago($nuevo, $empresas) . " - " . $tipoDePago
         );
         if (!$editado && count($cheques) > 0) {
             registrarAuditoria(
@@ -1068,6 +1137,7 @@ $acuerdoForm = [
     "cantidad_cuotas" => $_POST["acuerdo_cantidad_cuotas"] ?? "",
     "monto_cuota" => $_POST["acuerdo_monto_cuota"] ?? "",
     "cuotas_pagadas_previas" => $_POST["acuerdo_cuotas_pagadas_previas"] ?? "0",
+    "pagos_previos_ids" => isset($_POST["pagos_previos_ids"]) && is_array($_POST["pagos_previos_ids"]) ? $_POST["pagos_previos_ids"] : [],
     "periodo_desde" => $_POST["acuerdo_periodo_desde"] ?? "",
     "periodo_hasta" => $_POST["acuerdo_periodo_hasta"] ?? "",
     "observaciones" => $_POST["acuerdo_observaciones"] ?? ""
@@ -1137,9 +1207,7 @@ $deudoresPeriodoActual = 0;
 foreach ($empresas as $empresa) {
     if (!empresaActiva($empresa)) continue;
     foreach (["Obra Social", "Sindicato", "Mutual"] as $tipo) {
-        $acuerdo = acuerdoEmpresa($empresa, $tipo);
-        if (!acuerdoValidoEmpresaTipo($empresa, $tipo) || !periodoPerteneceAcuerdo($acuerdo, $periodoActual) || periodoEsCuotaPrevia($acuerdo, $periodoActual)) continue;
-        if (!existePagoEmpresaTipoPeriodo($pagos, $empresa["id"] ?? "", $tipo, $periodoActual)) {
+        if (!existePagoEmpresaTipoPeriodoTipoPago($pagos, $empresas, $empresa["id"] ?? "", $tipo, $periodoActual, "Pago al día")) {
             $deudoresPeriodoActual++;
         }
     }
@@ -1182,6 +1250,7 @@ $tabInicial = $editarPago
 <html lang="es">
 <head>
 <meta charset="UTF-8">
+<link rel="icon" type="image/png" href="favicon.png?v=<?php echo time(); ?>">
 <title>Registro de Pagos Empresas</title>
 <style>
 body{margin:0;font-family:Arial;background:#f3f6f4;color:#222}
@@ -1243,6 +1312,12 @@ textarea{width:100%;height:65px;margin-top:12px}
 .resumen-acuerdo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
 .resumen-acuerdo-item{background:white;border-radius:8px;padding:10px}
 .resumen-acuerdo-item strong{display:block;color:#555;font-size:12px;margin-bottom:4px}
+.pagos-previos-selector{margin-top:18px;padding:16px;border:1px solid #b9dfcc;border-radius:12px;background:#f7fbf9}
+.pagos-previos-selector h3{margin:0 0 6px;color:#087a46}
+.pagos-previos-selector table{margin-top:12px;background:white}
+.pagos-previos-selector input[type="checkbox"]{width:auto}
+.pago-fuera-periodo{background:#fff7e6}
+.advertencia{color:#8a5a00;font-size:12px}
 button{background:#087a46;color:white;border:0;font-weight:bold;cursor:pointer}
 .btn-cancelar{display:inline-block;background:#777;color:white;padding:10px 14px;border-radius:8px;text-decoration:none;margin-left:8px}
 .btn-secundario{display:inline-block;background:#eaf7f0;color:#087a46;border:1px solid #b9dfcc;padding:9px 12px;border-radius:8px;text-decoration:none;font-weight:bold;margin-right:8px}
@@ -1529,7 +1604,7 @@ if ($advertenciaEmpresa) $empresasMostradas = $coincidenciasEmpresa["parecidas"]
 <label for="pagoTipoPago">Tipo de pago</label>
 <select name="tipo_pago" id="pagoTipoPago" required>
 <option value="">Seleccionar tipo de pago</option>
-<?php foreach(["Pago único","Cuota de acuerdo"] as $op): ?>
+<?php foreach(["Pago al día","Cuota de acuerdo","Pago único / extraordinario"] as $op): ?>
 <option value="<?= e($op) ?>" <?= (($editarPago["tipo_pago"] ?? "") === $op) ? "selected" : "" ?>><?= e($op) ?></option>
 <?php endforeach; ?>
 </select>
@@ -1668,6 +1743,11 @@ Comprobante actual:
 </div>
 </div>
 
+<div class="pagos-previos-selector" id="pagosPreviosSelector" aria-live="polite">
+<h3>Pagos registrados que podrían corresponder a cuotas previas</h3>
+<p class="sin">Seleccioná una empresa y un tipo para consultar pagos existentes.</p>
+</div>
+
 <div class="campo" style="margin-top:12px">
 <label for="acuerdoObservaciones">Observaciones</label>
 <textarea id="acuerdoObservaciones" name="acuerdo_observaciones" placeholder="Observaciones del acuerdo"><?= e($acuerdoForm["observaciones"] ?? "") ?></textarea>
@@ -1713,9 +1793,9 @@ Comprobante actual:
 
 <div class="informe-resumen">
 <div class="box"><div class="label">Período consultado</div><div class="num" id="informePeriodoConsultado">--</div></div>
-<div class="box"><div class="label">Total esperado del período</div><div class="num" id="informeEsperado">$0,00</div></div>
+<div class="box"><div class="label">Total esperado de acuerdos</div><div class="num" id="informeEsperado">$0,00</div></div>
 <div class="box"><div class="label">Total cobrado del período</div><div class="num" id="informeTotal">$0,00</div></div>
-<div class="box"><div class="label">Pendiente de cobro</div><div class="num" id="informePendiente">$0,00</div></div>
+<div class="box"><div class="label">Pendiente de acuerdos</div><div class="num" id="informePendiente">$0,00</div></div>
 <div class="box"><div class="label">Empresas que pagaron</div><div class="num" id="informePagaron">0</div></div>
 <div class="box"><div class="label">Empresas que NO pagaron</div><div class="num" id="informeNoPagaron">0</div></div>
 </div>
@@ -1727,7 +1807,7 @@ Comprobante actual:
 <th>Razón social</th>
 <th>CUIT</th>
 <th>Tipo</th>
-<th>Plan</th>
+<th>Tipo de pago</th>
 <th>Cuota esperada</th>
 <th>Monto pagado</th>
 <th>Estado</th>
@@ -1748,7 +1828,7 @@ Comprobante actual:
 <th>Razón social</th>
 <th>CUIT</th>
 <th>Tipo adeudado</th>
-<th>Plan</th>
+<th>Tipo de pago</th>
 <th>Cuota esperada</th>
 <th>Período acuerdo</th>
 <th>Último pago registrado</th>
@@ -1951,6 +2031,7 @@ $categoriaMutual = ($deudaMutual > 0 || $pagadoMutual > 0) ? "1" : "0";
 <th>Empresa</th>
 <th>CUIT</th>
 <th>Tipo</th>
+<th>Tipo de pago</th>
 <th>Forma</th>
 <th>Período</th>
 <th>Monto</th>
@@ -1960,19 +2041,21 @@ $categoriaMutual = ($deudaMutual > 0 || $pagadoMutual > 0) ? "1" : "0";
 </thead>
 <tbody>
 <?php if(empty($pagos)): ?>
-<tr><td colspan="9" class="sin">Todavía no hay pagos registrados.</td></tr>
+<tr><td colspan="10" class="sin">Todavía no hay pagos registrados.</td></tr>
 <?php endif; ?>
 
 <?php foreach(array_reverse($pagos) as $p):
 $emp = buscarEmpresa($empresas, $p["empresa_id"] ?? "");
 $periodoPago = periodoParaInput($p["periodo"] ?? "");
 $cantidadChequesPago = count(chequesPago($p));
+$esPagoPrevioVinculado = $emp && pagoVinculadoComoPrevio($p, $emp);
 ?>
 <tr class="fila-pago" data-busqueda="<?= e(($emp["razon"] ?? "Empresa eliminada") . " " . ($emp["cuit"] ?? "")) ?>" data-tipo="<?= e($p["tipo"] ?? "") ?>" data-forma="<?= e($p["forma_pago"] ?? "") ?>" data-periodo="<?= e($periodoPago) ?>">
 <td><?= e($p["fecha"] ?? "") ?></td>
 <td><?= e($emp["razon"] ?? "Empresa eliminada") ?></td>
 <td><?= e($emp["cuit"] ?? "") ?></td>
-<td><span class="badge"><?= e($p["tipo"] ?? "") ?></span></td>
+<td><span class="badge"><?= e($p["tipo"] ?? "") ?></span><?php if($esPagoPrevioVinculado): ?><br><span class="estado estado-previa">Aplicado como cuota previa del acuerdo</span><?php endif; ?></td>
+<td><?= e(tipoPagoCompatible($p, $empresas)) ?></td>
 <td><?= e((($p["forma_pago"] ?? "") ?: ($cantidadChequesPago > 0 ? "Cheque" : "")) . ($cantidadChequesPago > 0 ? " (" . $cantidadChequesPago . ")" : "")) ?></td>
 <td><?= e($periodoPago) ?></td>
 <td><?= dinero($p["monto"] ?? 0) ?></td>
@@ -2071,6 +2154,7 @@ $cantidadChequesPago = count(chequesPago($p));
 <script>
 const empresasData = <?= json_encode($empresas, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
 const pagosData = <?= json_encode($pagos, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
+const pagosPreviosFormData = <?= json_encode(array_values($acuerdoForm["pagos_previos_ids"] ?? []), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
 const tiposInforme = ["Obra Social", "Sindicato", "Mutual"];
 const tabInicial = <?= json_encode($tabInicial, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
 
@@ -2105,6 +2189,64 @@ document.querySelectorAll(".periodo-input").forEach((input) => {
 
 const acuerdoFormEl = document.getElementById("acuerdoForm");
 if (acuerdoFormEl) {
+    const pagosPreviosSeleccionados = () => Array.from(
+        acuerdoFormEl.querySelectorAll('input[name="pagos_previos_ids[]"]:checked')
+    ).map((input) => input.value);
+
+    const renderPagosPreviosAcuerdo = (seleccionForzada = null) => {
+        const contenedor = document.getElementById("pagosPreviosSelector");
+        if (!contenedor) return;
+        const empresaId = acuerdoFormEl.querySelector('input[name="acuerdo_empresa_id"]')?.value || "";
+        const tipo = acuerdoFormEl.querySelector('select[name="acuerdo_tipo"]')?.value || "";
+        const desde = periodoAMesIndice(acuerdoFormEl.querySelector('input[name="acuerdo_periodo_desde"]')?.value || "");
+        const hasta = periodoAMesIndice(acuerdoFormEl.querySelector('input[name="acuerdo_periodo_hasta"]')?.value || "");
+        const seleccion = new Set(seleccionForzada === null ? pagosPreviosSeleccionados() : seleccionForzada);
+
+        if (!empresaId || !tipo) {
+            contenedor.innerHTML = '<h3>Pagos registrados que podrían corresponder a cuotas previas</h3><p class="sin">Seleccioná una empresa y un tipo para consultar pagos existentes.</p>';
+            return;
+        }
+
+        const candidatos = pagosData
+            .filter((pago) => (pago.empresa_id || "") === empresaId && (pago.tipo || "") === tipo && (pago.id || ""))
+            .map((pago) => {
+                const indice = periodoAMesIndice(pago.periodo || "");
+                return { pago, dentro: desde !== null && hasta !== null && indice !== null && indice >= desde && indice <= hasta };
+            })
+            .sort((a, b) => Number(b.dentro) - Number(a.dentro) || periodoNormalizado(a.pago.periodo || "").localeCompare(periodoNormalizado(b.pago.periodo || "")));
+
+        if (!candidatos.length) {
+            contenedor.innerHTML = '<h3>Pagos registrados que podrían corresponder a cuotas previas</h3><p class="sin">No hay pagos registrados para esta empresa y tipo.</p>';
+            return;
+        }
+
+        contenedor.innerHTML = `<h3>Pagos registrados que podrían corresponder a cuotas previas</h3>
+<p>Marcá los pagos que ya forman parte de las cuotas previas declaradas.</p>
+<table><thead><tr><th></th><th>Fecha</th><th>Período</th><th>Monto</th><th>Forma de pago</th><th>Observaciones</th></tr></thead><tbody>
+${candidatos.map(({ pago, dentro }) => `<tr class="${dentro ? "" : "pago-fuera-periodo"}">
+<td><input type="checkbox" name="pagos_previos_ids[]" value="${escapeHtml(pago.id || "")}" ${seleccion.has(pago.id || "") ? "checked" : ""}></td>
+<td>${escapeHtml(pago.fecha || "")}</td>
+<td>${escapeHtml(periodoNormalizado(pago.periodo || ""))}${dentro ? "" : '<div class="advertencia">Fuera del período del acuerdo</div>'}</td>
+<td>${dineroCliente(pago.monto)}</td>
+<td>${escapeHtml(pago.forma_pago || "")}</td>
+<td>${escapeHtml(pago.observaciones || "")}</td>
+</tr>`).join("")}
+</tbody></table>`;
+
+        contenedor.querySelectorAll('input[name="pagos_previos_ids[]"]').forEach((checkbox) => {
+            checkbox.addEventListener("change", () => {
+                const previas = Math.max(Number(acuerdoFormEl.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]')?.value || 0), 0);
+                if (pagosPreviosSeleccionados().length > previas) {
+                    checkbox.checked = false;
+                    alert("Los pagos previos vinculados no pueden superar las cuotas previas declaradas.");
+                }
+                acuerdoFormEl.actualizarResumen?.();
+            });
+        });
+    };
+
+    acuerdoFormEl.renderPagosPrevios = renderPagosPreviosAcuerdo;
+
     const actualizarResumenAcuerdo = () => {
         const cantidadInput = acuerdoFormEl.querySelector('input[name="acuerdo_cantidad_cuotas"]');
         const previasInput = acuerdoFormEl.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]');
@@ -2114,6 +2256,8 @@ if (acuerdoFormEl) {
         const cantidadIngresada = Number(cantidadInput?.value || 0);
         const cantidad = Math.max(cantidadIngresada, 0);
         const previas = Math.min(Math.max(Number(previasInput?.value || 0), 0), Math.max(cantidad - 1, 0));
+        const vinculadas = pagosPreviosSeleccionados().length;
+        const previasSinRegistro = Math.max(previas - vinculadas, 0);
         const pendientes = Math.max(cantidad - previas, 0);
         const montoTotal = Number(acuerdoFormEl.querySelector('input[name="acuerdo_monto_total"]')?.value || 0);
         const montoCuota = Number(montoCuotaInput?.value || 0);
@@ -2129,6 +2273,8 @@ if (acuerdoFormEl) {
                 <div class="resumen-acuerdo-item"><strong>Monto total</strong>${dineroCliente(montoTotal)}</div>
                 <div class="resumen-acuerdo-item"><strong>Monto cuota</strong>${dineroCliente(montoCuota)}</div>
                 <div class="resumen-acuerdo-item"><strong>Cuotas previas pagadas</strong>${previas}</div>
+                <div class="resumen-acuerdo-item"><strong>Pagos previos vinculados</strong>${vinculadas}</div>
+                <div class="resumen-acuerdo-item"><strong>Previas estimadas sin registro</strong>${previasSinRegistro}</div>
                 <div class="resumen-acuerdo-item"><strong>Cuotas pendientes</strong>${pendientes}</div>
                 <div class="resumen-acuerdo-item"><strong>Período</strong>${escapeHtml(desde)} a ${escapeHtml(hasta)}</div>
             </div>`;
@@ -2138,7 +2284,12 @@ if (acuerdoFormEl) {
     acuerdoFormEl.addEventListener("input", actualizarResumenAcuerdo);
     acuerdoFormEl.addEventListener("change", actualizarResumenAcuerdo);
     acuerdoFormEl.actualizarResumen = actualizarResumenAcuerdo;
+    renderPagosPreviosAcuerdo(pagosPreviosFormData);
     actualizarResumenAcuerdo();
+
+    ["acuerdo_periodo_desde", "acuerdo_periodo_hasta"].forEach((nombre) => {
+        acuerdoFormEl.querySelector(`[name="${nombre}"]`)?.addEventListener("change", () => renderPagosPreviosAcuerdo());
+    });
 
     acuerdoFormEl.addEventListener("submit", (event) => {
         const empresaId = acuerdoFormEl.querySelector('input[name="acuerdo_empresa_id"]')?.value || "";
@@ -2146,6 +2297,7 @@ if (acuerdoFormEl) {
         const cantidadCuotas = Number(acuerdoFormEl.querySelector('input[name="acuerdo_cantidad_cuotas"]')?.value || 0);
         const montoCuota = Number(acuerdoFormEl.querySelector('input[name="acuerdo_monto_cuota"]')?.value || 0);
         const cuotasPrevias = Number(acuerdoFormEl.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]')?.value || 0);
+        const pagosPrevios = pagosPreviosSeleccionados();
         const periodoDesde = acuerdoFormEl.querySelector('input[name="acuerdo_periodo_desde"]');
         const periodoHasta = acuerdoFormEl.querySelector('input[name="acuerdo_periodo_hasta"]');
 
@@ -2174,6 +2326,12 @@ if (acuerdoFormEl) {
             event.preventDefault();
             alert("Las cuotas previas ya pagadas deben ser mayores o iguales a 0 y menores que la cantidad total de cuotas.");
             acuerdoFormEl.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]')?.focus();
+            return;
+        }
+
+        if (pagosPrevios.length > cuotasPrevias) {
+            event.preventDefault();
+            alert("Los pagos previos vinculados no pueden superar las cuotas previas declaradas.");
             return;
         }
 
@@ -2220,17 +2378,18 @@ if (acuerdoFormEl) {
     });
 }
 
-const mensajePagoDuplicado = "Ya existe un pago cargado para esta empresa, este tipo y este período.";
+const mensajePagoDuplicado = "Ya existe un pago cargado para esta empresa, este tipo, este período y este tipo de pago.";
 
-function buscarPagoDuplicado(empresaId, tipo, periodo, pagoIdIgnorado = "") {
+function buscarPagoDuplicado(empresaId, tipo, periodo, tipoPago, pagoIdIgnorado = "") {
     const periodoBuscado = periodoNormalizado(periodo);
-    if (!empresaId || !tipo || !periodoValidoCliente(periodoBuscado)) return null;
+    if (!empresaId || !tipo || !tipoPago || !periodoValidoCliente(periodoBuscado)) return null;
 
     return pagosData.find((pago) =>
         (pago.id || "") !== pagoIdIgnorado &&
         (pago.empresa_id || "") === empresaId &&
         (pago.tipo || "") === tipo &&
-        periodoNormalizado(pago.periodo || "") === periodoBuscado
+        periodoNormalizado(pago.periodo || "") === periodoBuscado &&
+        tipoPagoCompatibleCliente(pago) === tipoPago
     ) || null;
 }
 
@@ -2325,8 +2484,12 @@ if (pagoForm) {
             resumenAcuerdo.innerHTML = '<p class="sin">Seleccioná el tipo de pago.</p>';
             return;
         }
-        if (tipoPago === "Pago único") {
-            resumenAcuerdo.innerHTML = '<p><strong>Pago único.</strong> No requiere un acuerdo previo.</p>';
+        if (tipoPago === "Pago al día") {
+            resumenAcuerdo.innerHTML = '<p><strong>Pago al día.</strong> Corresponde al período corriente y no requiere un acuerdo.</p>';
+            return;
+        }
+        if (tipoPago === "Pago único / extraordinario") {
+            resumenAcuerdo.innerHTML = '<p><strong>Pago único / extraordinario.</strong> Es un pago suelto y no requiere un acuerdo.</p>';
             return;
         }
         if (!empresaId || !tipo || !empresa) {
@@ -2355,12 +2518,18 @@ if (pagoForm) {
             periodos.includes(periodoNormalizado(pago.periodo || ""))
         );
         const pagosSistema = periodos.filter((periodo, indice) =>
-            indice >= previas && pagosAcuerdo.some((pago) => periodoNormalizado(pago.periodo || "") === periodo)
+            indice >= previas && pagosAcuerdo.some((pago) =>
+                periodoNormalizado(pago.periodo || "") === periodo &&
+                !pagoVinculadoComoPrevioCliente(pago, empresa)
+            )
         ).length;
         const pendientes = Math.max(cantidad - previas - pagosSistema, 0);
 
         const filas = periodos.map((periodo, indice) => {
             const pago = pagosAcuerdo.find((item) => periodoNormalizado(item.periodo || "") === periodo);
+            if (pago && pagoVinculadoComoPrevioCliente(pago, empresa)) {
+                return `<tr><td>${escapeHtml(periodo)}</td><td><span class="estado estado-previa">Pagada previa registrada</span></td><td><a class="btn-secundario" href="?editar_pago=${encodeURIComponent(pago.id || "")}#cargar-pago">Ver pago</a></td></tr>`;
+            }
             if (indice < previas) {
                 return `<tr><td>${escapeHtml(periodo)}</td><td><span class="estado estado-previa">Pagada previa</span></td><td>-</td></tr>`;
             }
@@ -2404,10 +2573,11 @@ if (pagoForm) {
     const validarDuplicadoCliente = (mostrarAlerta = false) => {
         const empresaId = empresaIdInput?.value || "";
         const tipo = tipoInput?.value || "";
+        const tipoPago = tipoPagoInput?.value || "";
         const periodo = periodoInput?.value || "";
         const pagoId = pagoIdInput?.value || "";
-        const duplicado = buscarPagoDuplicado(empresaId, tipo, periodo, pagoId);
-        const clave = duplicado ? `${empresaId}|${tipo}|${periodoNormalizado(periodo)}` : "";
+        const duplicado = buscarPagoDuplicado(empresaId, tipo, periodo, tipoPago, pagoId);
+        const clave = duplicado ? `${empresaId}|${tipo}|${periodoNormalizado(periodo)}|${tipoPago}` : "";
 
         if (avisoDuplicado) {
             avisoDuplicado.textContent = duplicado ? mensajePagoDuplicado : "";
@@ -2432,7 +2602,10 @@ if (pagoForm) {
         validarDuplicadoCliente(true);
         renderResumenAcuerdoPago();
     });
-    tipoPagoInput?.addEventListener("change", renderResumenAcuerdoPago);
+    tipoPagoInput?.addEventListener("change", () => {
+        validarDuplicadoCliente(true);
+        renderResumenAcuerdoPago();
+    });
     periodoInput?.addEventListener("change", () => validarDuplicadoCliente(true));
     periodoInput?.addEventListener("input", () => validarDuplicadoCliente(false));
 
@@ -2761,6 +2934,7 @@ function acuerdoEmpresaTipo(empresa, tipo) {
         cantidad_cuotas: 1,
         monto_cuota: 0,
         cuotas_pagadas_previas: 0,
+        pagos_previos_ids: [],
         periodo_desde: "",
         periodo_hasta: "",
         observaciones: ""
@@ -2778,6 +2952,26 @@ function acuerdoEmpresaTipo(empresa, tipo) {
         periodo_hasta: empresa?.periodo_hasta || "",
         observaciones: empresa?.observaciones_acuerdo || ""
     };
+}
+
+function pagosPreviosIdsCliente(empresa, tipo) {
+    const ids = acuerdoEmpresaTipo(empresa, tipo).pagos_previos_ids;
+    return Array.isArray(ids) ? [...new Set(ids.map(String).filter(Boolean))] : [];
+}
+
+function pagoVinculadoComoPrevioCliente(pago, empresa = null) {
+    const empresaPago = empresa || obtenerEmpresa(pago?.empresa_id || "");
+    if (!empresaPago) return false;
+    return pagosPreviosIdsCliente(empresaPago, pago?.tipo || "").includes(String(pago?.id || ""));
+}
+
+function pagosPreviosVinculadosCliente(empresa, tipo) {
+    const ids = new Set(pagosPreviosIdsCliente(empresa, tipo));
+    return pagosData.filter((pago) =>
+        ids.has(String(pago.id || "")) &&
+        (pago.empresa_id || "") === (empresa.id || "") &&
+        (pago.tipo || "") === tipo
+    );
 }
 
 function planEmpresa(empresa, tipo = "Obra Social") {
@@ -2834,14 +3028,22 @@ function cuotaPreviaPagadaEmpresaPeriodo(empresa, periodo, tipo = "Obra Social")
 }
 
 function esCuotaAcuerdoPago(pago, empresa = null, tipo = "") {
-    if ((pago?.tipo_pago || "") === "Cuota de acuerdo") return true;
-    if ((pago?.tipo_pago || "") === "Pago único") return false;
-    if ((pago?.pago_tipo || "") === "Cuotas") return true;
-    if ((pago?.pago_tipo || "") === "Pago total") return false;
+    return tipoPagoCompatibleCliente(pago, empresa, tipo) === "Cuota de acuerdo";
+}
 
+function tipoPagoCompatibleCliente(pago, empresa = null, tipo = "") {
+    if (["Pago al día", "Cuota de acuerdo", "Pago único / extraordinario"].includes(pago?.tipo_pago || "")) {
+        return pago.tipo_pago;
+    }
+    if ((pago?.tipo_pago || "") === "Pago único") return "Pago único / extraordinario";
+    if ((pago?.pago_tipo || "") === "Cuotas") return "Cuota de acuerdo";
+    if ((pago?.pago_tipo || "") === "Pago total") return "Pago único / extraordinario";
     const empresaPago = empresa || obtenerEmpresa(pago?.empresa_id || "");
     const tipoPago = tipo || pago?.tipo || "";
-    return !!empresaPago && cuotaEsperadaEmpresaPeriodo(empresaPago, pago?.periodo || "", tipoPago) > 0;
+    if (empresaPago && cuotaEsperadaEmpresaPeriodo(empresaPago, pago?.periodo || "", tipoPago) > 0) {
+        return "Cuota de acuerdo";
+    }
+    return "Pago único / extraordinario";
 }
 
 function obtenerEmpresa(id) {
@@ -3133,14 +3335,18 @@ function resumenFinancieroCliente(empresa, tipo) {
     const pagosRegistrados = totalPagadoCliente(empresa.id || "", tipo);
     const montoCuota = tieneAcuerdo ? Math.max(Number(acuerdo.monto_cuota || 0), 0) : 0;
     const previas = tieneAcuerdo ? Math.max(Number(acuerdo.cuotas_pagadas_previas || 0), 0) : 0;
+    const vinculadas = tieneAcuerdo ? pagosPreviosVinculadosCliente(empresa, tipo).length : 0;
+    const previasSinRegistro = Math.max(previas - vinculadas, 0);
     const deuda = tieneAcuerdo ? Math.max(Number(acuerdo.monto_total || 0), 0) : 0;
-    const cobrado = pagosRegistrados + previas * montoCuota;
+    const cobrado = pagosRegistrados + previasSinRegistro * montoCuota;
 
     return {
         tieneAcuerdo,
         deuda,
         cobrado,
-        saldo: Math.max(deuda - cobrado, 0)
+        saldo: Math.max(deuda - cobrado, 0),
+        vinculadas,
+        previasSinRegistro
     };
 }
 
@@ -3165,10 +3371,13 @@ function resumenDetalleAcuerdo(empresa, tipo) {
 
     const cantidad = Math.max(Number(acuerdo.cantidad_cuotas || 2), 2);
     const previas = Math.min(Math.max(Number(acuerdo.cuotas_pagadas_previas || 0), 0), cantidad - 1);
+    const pagosPrevios = pagosPreviosVinculadosCliente(empresa, tipo);
+    const idsPrevios = new Set(pagosPrevios.map((pago) => String(pago.id || "")));
     const montoCuota = Number(acuerdo.monto_cuota || 0);
     const pagosSistema = pagosData.filter((pago) =>
         (pago.empresa_id || "") === (empresa.id || "") &&
         (pago.tipo || "") === tipo &&
+        !idsPrevios.has(String(pago.id || "")) &&
         esCuotaAcuerdoPago(pago, empresa, tipo) &&
         cuotaEsperadaEmpresaPeriodo(empresa, pago.periodo || "", tipo) > 0 &&
         !cuotaPreviaPagadaEmpresaPeriodo(empresa, pago.periodo || "", tipo)
@@ -3182,8 +3391,10 @@ function resumenDetalleAcuerdo(empresa, tipo) {
 <div>Monto total acuerdo: ${dineroCliente(acuerdo.monto_total)}</div>
 <div>Cantidad total de cuotas: ${cantidad}</div>
 <div>Monto cuota: ${dineroCliente(montoCuota)}</div>
-<div>Cuotas previas pagadas: ${previas}</div>
-<div>Cuotas registradas en sistema: ${cuotasSistema}</div>
+<div>Cuotas previas declaradas: ${previas}</div>
+<div>Pagos previos vinculados: ${pagosPrevios.length}</div>
+<div>Cuotas previas estimadas sin registro: ${Math.max(previas - pagosPrevios.length, 0)}</div>
+<div>Cuotas registradas posteriores: ${cuotasSistema}</div>
 <div>Cuotas pendientes: ${cuotasPendientes}</div>
 <div>Saldo pendiente estimado: ${dineroCliente(saldoEstimado)}</div>
 <div style="margin-top:10px"><a class="btn-danger" href="?eliminar_acuerdo=${encodeURIComponent(empresa.id || "")}&tipo_acuerdo=${encodeURIComponent(tipo)}&origen=ficha" onclick="return confirm('¿Eliminar este acuerdo? No se eliminarán los pagos ya cargados.')" title="Eliminar acuerdo" aria-label="Eliminar acuerdo">🗑️</a></div>
@@ -3240,7 +3451,13 @@ function seleccionarEmpresaFicha(empresaId) {
         if (!tieneDatosAcuerdo(empresa, tipo)) return total;
         const cantidad = Math.max(Number(acuerdo.cantidad_cuotas || 0), 0);
         const previas = Math.max(Number(acuerdo.cuotas_pagadas_previas || 0), 0);
-        const cuotasSistema = pagosEmpresa.filter((pago) => (pago.tipo || "") === tipo && esCuotaAcuerdoPago(pago, empresa, tipo)).length;
+        const cuotasSistema = pagosEmpresa.filter((pago) =>
+            (pago.tipo || "") === tipo &&
+            !pagoVinculadoComoPrevioCliente(pago, empresa) &&
+            esCuotaAcuerdoPago(pago, empresa, tipo) &&
+            cuotaEsperadaEmpresaPeriodo(empresa, pago.periodo || "", tipo) > 0 &&
+            !cuotaPreviaPagadaEmpresaPeriodo(empresa, pago.periodo || "", tipo)
+        ).length;
         return total + Math.max(cantidad - previas - cuotasSistema, 0);
     }, 0);
     ficha.innerHTML = `
@@ -3271,7 +3488,7 @@ ${chequesEmpresa.length ? `<table><thead><tr><th>Fecha de cobro</th><th>Estado</
     return `<tr><td>${escapeHtml(fechaChequeMostrar(item.cheque.fecha_cobro || ""))}</td><td><span class="estado ${clase}">${escapeHtml(item.estado)}</span></td><td>${accion}</td></tr>`;
 }).join("")}</tbody></table>` : '<p class="sin">Sin cheques registrados.</p>'}
 <h3 class="mini-title">Pagos registrados</h3>
-${pagosEmpresa.length ? `<table><thead><tr><th>Fecha</th><th>Tipo</th><th>Período</th><th>Monto</th><th>Forma</th><th>Acciones</th></tr></thead><tbody>${pagosEmpresa.map((pago) => `<tr><td>${escapeHtml(pago.fecha || "")}</td><td>${escapeHtml(pago.tipo || "")}</td><td>${escapeHtml(periodoNormalizado(pago.periodo || ""))}</td><td>${dineroCliente(pago.monto)}</td><td>${escapeHtml(formaPagoConCheques(pago))}</td><td><a class="btn-danger" href="?eliminar_pago=${encodeURIComponent(pago.id || "")}" onclick="return confirm('¿Eliminar este pago? Esta acción no elimina la empresa.')" title="Eliminar pago" aria-label="Eliminar pago">🗑️</a></td></tr>`).join("")}</tbody></table>` : '<p class="sin">Sin pagos registrados.</p>'}
+${pagosEmpresa.length ? `<table><thead><tr><th>Fecha</th><th>Tipo</th><th>Tipo de pago</th><th>Período</th><th>Monto</th><th>Forma</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>${pagosEmpresa.map((pago) => `<tr><td>${escapeHtml(pago.fecha || "")}</td><td>${escapeHtml(pago.tipo || "")}</td><td>${escapeHtml(tipoPagoCompatibleCliente(pago, empresa, pago.tipo || ""))}</td><td>${escapeHtml(periodoNormalizado(pago.periodo || ""))}</td><td>${dineroCliente(pago.monto)}</td><td>${escapeHtml(formaPagoConCheques(pago))}</td><td>${pagoVinculadoComoPrevioCliente(pago, empresa) ? '<span class="estado estado-previa">Cuota previa vinculada</span>' : '<span class="estado estado-ok">Pago registrado</span>'}</td><td><a class="btn-danger" href="?eliminar_pago=${encodeURIComponent(pago.id || "")}" onclick="return confirm('¿Eliminar este pago? Esta acción no elimina la empresa.')" title="Eliminar pago" aria-label="Eliminar pago">🗑️</a></td></tr>`).join("")}</tbody></table>` : '<p class="sin">Sin pagos registrados.</p>'}
 <br>
 <a class="btn-secundario" href="?editar_empresa=${encodeURIComponent(empresa.id || "")}">Editar empresa</a>
 ${empresaActivaCliente(empresa) ? `<a class="btn-danger" href="?eliminar_empresa=${encodeURIComponent(empresa.id || "")}" onclick="return confirm('La empresa quedará inactiva y sus pagos se conservarán. ¿Dar de baja empresa?')" title="Dar de baja empresa" aria-label="Dar de baja empresa">🗑️</a>` : ""}
@@ -3319,8 +3536,8 @@ function ultimoPagoEmpresaTipo(empresaId, tipo) {
     return pagosTipo[0] || null;
 }
 
-function completarFormularioPago(empresaId, tipo, periodo) {
-    if (buscarPagoDuplicado(empresaId, tipo, periodo)) {
+function completarFormularioPago(empresaId, tipo, periodo, tipoPagoInicial = "Pago al día") {
+    if (buscarPagoDuplicado(empresaId, tipo, periodo, tipoPagoInicial)) {
         alert(mensajePagoDuplicado);
         return;
     }
@@ -3347,11 +3564,8 @@ function completarFormularioPago(empresaId, tipo, periodo) {
             tipoInput.value = tipo;
             tipoInput.dispatchEvent(new Event("change", { bubbles: true }));
         }
-        if (tipoPagoInput && empresaId && tipo && periodo) {
-            const empresa = obtenerEmpresa(empresaId);
-            tipoPagoInput.value = empresa && cuotaEsperadaEmpresaPeriodo(empresa, periodo, tipo) > 0
-                ? "Cuota de acuerdo"
-                : "Pago único";
+        if (tipoPagoInput) {
+            tipoPagoInput.value = tipoPagoInicial;
             tipoPagoInput.dispatchEvent(new Event("change", { bubbles: true }));
         }
         if (periodoInput) {
@@ -3392,6 +3606,7 @@ function cargarAcuerdoExistente() {
     const empresa = obtenerEmpresa(empresaId);
     if (!empresa || !tipo) {
         if (acciones) acciones.style.display = "none";
+        form.renderPagosPrevios?.([]);
         return;
     }
 
@@ -3405,6 +3620,7 @@ function cargarAcuerdoExistente() {
         form.querySelector('input[name="acuerdo_periodo_desde"]').value = "";
         form.querySelector('input[name="acuerdo_periodo_hasta"]').value = "";
         form.querySelector('textarea[name="acuerdo_observaciones"]').value = "";
+        form.renderPagosPrevios?.([]);
         if (typeof form.actualizarResumen === "function") form.actualizarResumen();
         return;
     }
@@ -3420,6 +3636,7 @@ function cargarAcuerdoExistente() {
     form.querySelector('input[name="acuerdo_periodo_desde"]').value = periodoNormalizado(acuerdo.periodo_desde || "");
     form.querySelector('input[name="acuerdo_periodo_hasta"]').value = periodoNormalizado(acuerdo.periodo_hasta || "");
     form.querySelector('textarea[name="acuerdo_observaciones"]').value = acuerdo.observaciones || "";
+    form.renderPagosPrevios?.(Array.isArray(acuerdo.pagos_previos_ids) ? acuerdo.pagos_previos_ids : []);
     if (typeof form.actualizarResumen === "function") form.actualizarResumen();
 }
 
@@ -3465,9 +3682,7 @@ function configurarInformePeriodo() {
         const pagosAgrupados = new Map();
         pagosPeriodo.forEach((pago) => {
             const empresaPago = obtenerEmpresa(pago.empresa_id || "");
-            const categoria = empresaPago && esCuotaAcuerdoPago(pago, empresaPago, pago.tipo || "")
-                ? "cuota"
-                : "unico";
+            const categoria = tipoPagoCompatibleCliente(pago, empresaPago, pago.tipo || "");
             const clave = (pago.empresa_id || "") + "|" + (pago.tipo || "") + "|" + categoria;
             const actual = pagosAgrupados.get(clave) || {
                 empresaId: pago.empresa_id || "",
@@ -3476,12 +3691,14 @@ function configurarInformePeriodo() {
                 monto: 0,
                 fechas: [],
                 comprobantes: [],
-                ids: []
+                ids: [],
+                vinculadoPrevio: false
             };
             actual.monto += Number(pago.monto) || 0;
             if (pago.fecha) actual.fechas.push(pago.fecha);
             if (pago.comprobante) actual.comprobantes.push(pago.comprobante);
             if (pago.id) actual.ids.push(pago.id);
+            if (empresaPago && pagoVinculadoComoPrevioCliente(pago, empresaPago)) actual.vinculadoPrevio = true;
             pagosAgrupados.set(clave, actual);
         });
 
@@ -3492,65 +3709,74 @@ function configurarInformePeriodo() {
 
         empresasData.filter((empresa) => empresaActivaCliente(empresa)).forEach((empresa) => {
             tiposSeleccionados.forEach((tipo) => {
-                const clave = (empresa.id || "") + "|" + tipo + "|cuota";
+                const claveCuota = (empresa.id || "") + "|" + tipo + "|Cuota de acuerdo";
+                const claveAlDia = (empresa.id || "") + "|" + tipo + "|Pago al día";
                 const esperadoPorAcuerdo = cuotaEsperadaEmpresaPeriodo(empresa, periodo, tipo);
                 const pagadaPrevia = cuotaPreviaPagadaEmpresaPeriodo(empresa, periodo, tipo);
-                const pago = pagosAgrupados.get(clave);
-                const aplicaEnPeriodo = esperadoPorAcuerdo > 0 || pago;
+                const pagoCuota = pagosAgrupados.get(claveCuota);
+                const pagoAlDia = pagosAgrupados.get(claveAlDia);
 
-                if (!aplicaEnPeriodo) return;
+                if (esperadoPorAcuerdo > 0 || pagoCuota) {
+                    totalEsperado += esperadoPorAcuerdo;
+                    if (pagadaPrevia && !pagoCuota) {
+                        totalCubiertoPrevio += esperadoPorAcuerdo;
+                        filasPagaron.push({
+                            empresa, tipo, plan: "Cuota de acuerdo", esperado: esperadoPorAcuerdo,
+                            pagado: esperadoPorAcuerdo, fechas: ["Cuota previa"], comprobantes: [], ids: [],
+                            categoria: "Cuota de acuerdo", estado: "PAGADA PREVIA"
+                        });
+                    } else if (pagoCuota) {
+                        if (pagoCuota.vinculadoPrevio) totalCubiertoPrevio += esperadoPorAcuerdo;
+                        filasPagaron.push({
+                            empresa, tipo, plan: "Cuota de acuerdo", esperado: esperadoPorAcuerdo,
+                            pagado: pagoCuota.monto, fechas: pagoCuota.fechas, comprobantes: pagoCuota.comprobantes,
+                            ids: pagoCuota.ids, categoria: "Cuota de acuerdo",
+                            vinculadoPrevio: pagoCuota.vinculadoPrevio,
+                            estado: pagoCuota.vinculadoPrevio ? "PAGADA PREVIA REGISTRADA" : "CUOTA DE ACUERDO PAGADA"
+                        });
+                    } else {
+                        deudores.push({
+                            empresa, tipo, plan: "Cuota de acuerdo",
+                            categoria: "Cuota de acuerdo", esperado: esperadoPorAcuerdo,
+                            estado: "CUOTA DE ACUERDO PENDIENTE"
+                        });
+                    }
+                }
 
-                const esperado = esperadoPorAcuerdo;
-                totalEsperado += esperado;
-
-                if (pagadaPrevia && !pago) {
-                    totalCubiertoPrevio += esperado;
+                if (pagoAlDia) {
                     filasPagaron.push({
-                        empresa,
-                        tipo,
-                        plan: planEmpresa(empresa, tipo),
-                        esperado,
-                        pagado: esperado,
-                        fechas: ["Cuota previa"],
-                        comprobantes: [],
-                        ids: [],
-                        categoria: "cuota",
-                        estado: "PAGADA PREVIA"
-                    });
-                } else if (pago) {
-                    filasPagaron.push({
-                        empresa,
-                        tipo,
-                        plan: planEmpresa(empresa, tipo),
-                        esperado,
-                        pagado: pago.monto,
-                        fechas: pago.fechas,
-                        comprobantes: pago.comprobantes,
-                        ids: pago.ids,
-                        categoria: "cuota",
-                        estado: esperado <= 0 ? "EXTRA" : (pago.monto >= esperado ? "AL DÍA" : "PARCIAL")
+                        empresa, tipo, plan: "Pago al día", esperado: 0, pagado: pagoAlDia.monto,
+                        fechas: pagoAlDia.fechas, comprobantes: pagoAlDia.comprobantes, ids: pagoAlDia.ids,
+                        categoria: "Pago al día", estado: "PAGADO AL DÍA"
                     });
                 } else {
-                    deudores.push({ empresa, tipo, plan: planEmpresa(empresa, tipo), esperado });
+                    deudores.push({
+                        empresa, tipo, plan: "Pago al día", categoria: "Pago al día",
+                        esperado: 0, estado: "PENDIENTE PAGO AL DÍA"
+                    });
                 }
             });
         });
 
         pagosAgrupados.forEach((pago, clave) => {
-            if (filasPagaron.some((fila) => (fila.empresa?.id || "") + "|" + fila.tipo + "|" + (fila.categoria || "cuota") === clave)) return;
+            if (filasPagaron.some((fila) => (fila.empresa?.id || "") + "|" + fila.tipo + "|" + fila.categoria === clave)) return;
             const empresa = obtenerEmpresa(pago.empresaId);
-            const esCuota = pago.categoria === "cuota";
             filasPagaron.push({
                 empresa,
                 tipo: pago.tipo,
-                plan: esCuota && empresa ? planEmpresa(empresa, pago.tipo) : "Pago único",
-                esperado: esCuota && empresa ? cuotaEsperadaEmpresaPeriodo(empresa, periodo, pago.tipo) : 0,
+                plan: pago.categoria,
+                esperado: pago.categoria === "Cuota de acuerdo" && empresa ? cuotaEsperadaEmpresaPeriodo(empresa, periodo, pago.tipo) : 0,
                 pagado: pago.monto,
                 fechas: pago.fechas,
                 comprobantes: pago.comprobantes,
                 ids: pago.ids,
                 categoria: pago.categoria,
-                estado: esCuota && empresa && cuotaEsperadaEmpresaPeriodo(empresa, periodo, pago.tipo) > 0 ? "AL DÍA" : "EXTRA"
+                vinculadoPrevio: pago.vinculadoPrevio,
+                estado: pago.vinculadoPrevio
+                    ? "PAGADA PREVIA REGISTRADA"
+                    : (pago.categoria === "Cuota de acuerdo"
+                        ? "CUOTA DE ACUERDO PAGADA"
+                        : (pago.categoria === "Pago al día" ? "PAGADO AL DÍA" : "PAGO EXTRAORDINARIO"))
             });
         });
 
@@ -3558,7 +3784,7 @@ function configurarInformePeriodo() {
             .filter((fila) => fila.estado !== "PAGADA PREVIA")
             .reduce((total, fila) => total + fila.pagado, 0);
         const totalPagadoCuotas = filasPagaron
-            .filter((fila) => fila.estado !== "PAGADA PREVIA" && fila.categoria === "cuota")
+            .filter((fila) => fila.estado !== "PAGADA PREVIA" && !fila.vinculadoPrevio && fila.categoria === "Cuota de acuerdo")
             .reduce((total, fila) => total + fila.pagado, 0);
         const pendiente = Math.max(totalEsperado - totalPagadoCuotas - totalCubiertoPrevio, 0);
         const empresasQuePagaron = new Set(filasPagaron.map((fila) => fila.empresa?.id || "").filter(Boolean));
@@ -3575,7 +3801,9 @@ function configurarInformePeriodo() {
             pagaronBody.innerHTML = '<tr><td colspan="10" class="sin">No hay pagos registrados para este período y tipo.</td></tr>';
         } else {
             pagaronBody.innerHTML = filasPagaron.map((fila) => {
-                const estadoClase = fila.estado === "AL DÍA" ? "estado-ok" : (fila.estado === "PAGADA PREVIA" ? "estado-previa" : (fila.estado === "EXTRA" ? "estado-ok" : "estado-parcial"));
+                const estadoClase = ["PAGADA PREVIA", "PAGADA PREVIA REGISTRADA"].includes(fila.estado)
+                    ? "estado-previa"
+                    : (["PAGADO AL DÍA", "CUOTA DE ACUERDO PAGADA", "PAGO EXTRAORDINARIO"].includes(fila.estado) ? "estado-ok" : "estado-parcial");
                 const comprobantes = (fila.comprobantes || []).length
                     ? fila.comprobantes.map((comp, index) => `<a href="${escapeHtml(comp)}" target="_blank" title="Ver">👁️</a> <a href="${escapeHtml(comp)}" download title="Descargar">⬇️</a>${index < fila.comprobantes.length - 1 ? " " : ""}`).join("")
                     : '<span class="sin">Sin comprobante</span>';
@@ -3601,9 +3829,9 @@ function configurarInformePeriodo() {
         if (deudores.length === 0) {
             noPagaronBody.innerHTML = '<tr><td colspan="9" class="sin">No hay empresas pendientes para este período y tipo.</td></tr>';
         } else {
-            noPagaronBody.innerHTML = deudores.map(({ empresa, tipo, plan, esperado }) => {
+            noPagaronBody.innerHTML = deudores.map(({ empresa, tipo, plan, categoria, esperado, estado }) => {
                 const ultimoPago = ultimoPagoEmpresaTipo(empresa.id || "", tipo);
-                const pagoYaCargado = buscarPagoDuplicado(empresa.id || "", tipo, periodo);
+                const pagoYaCargado = buscarPagoDuplicado(empresa.id || "", tipo, periodo, categoria);
                 const ultimo = ultimoPago
                     ? `${escapeHtml(periodoNormalizado(ultimoPago.periodo))} - ${escapeHtml(ultimoPago.fecha || "")} - ${dineroCliente(ultimoPago.monto)}`
                     : '<span class="sin">Sin pagos previos</span>';
@@ -3615,16 +3843,16 @@ function configurarInformePeriodo() {
 <td>${dineroCliente(esperado)}</td>
 <td>${escapeHtml(periodoAcuerdoEmpresa(empresa, tipo) || periodo)}</td>
 <td>${ultimo}</td>
-<td><span class="estado estado-deudor">DEUDOR</span></td>
+<td><span class="estado estado-deudor">${escapeHtml(estado || "DEUDOR")}</span></td>
 <td>${pagoYaCargado
-    ? '<button type="button" class="btn-small" disabled title="Ya existe un pago para esta empresa, tipo y período">Pago ya cargado</button>'
-    : `<button type="button" class="btn-small cargar-pago-informe" data-empresa="${escapeHtml(empresa.id || "")}" data-tipo="${escapeHtml(tipo)}" data-periodo="${escapeHtml(periodo)}">Cargar pago</button>`}</td>
+    ? '<button type="button" class="btn-small" disabled title="Ya existe un pago exacto para esta empresa, tipo, período y tipo de pago">Pago ya cargado</button>'
+    : `<button type="button" class="btn-small cargar-pago-informe" data-empresa="${escapeHtml(empresa.id || "")}" data-tipo="${escapeHtml(tipo)}" data-periodo="${escapeHtml(periodo)}" data-tipo-pago="${escapeHtml(categoria)}">Cargar pago</button>`}</td>
 </tr>`;
             }).join("");
 
             noPagaronBody.querySelectorAll(".cargar-pago-informe").forEach((boton) => {
                 boton.addEventListener("click", () => {
-                    completarFormularioPago(boton.dataset.empresa, boton.dataset.tipo, boton.dataset.periodo);
+                    completarFormularioPago(boton.dataset.empresa, boton.dataset.tipo, boton.dataset.periodo, boton.dataset.tipoPago);
                 });
             });
         }
