@@ -484,6 +484,7 @@ if (!isset($_SESSION["auth_pagos_empresas"]) || usuarioActual() === "") {
 <html lang="es">
 <head>
 <meta charset="UTF-8">
+<link rel="icon" type="image/png" href="favicon.png?v=<?php echo time(); ?>">
 <title>Pagos Empresas</title>
 <style>
 body{margin:0;font-family:Arial;background:#f3f6f4;display:flex;align-items:center;justify-content:center;height:100vh}
@@ -1023,6 +1024,7 @@ $tabInicial = $editarPago ? "cargar-pago" : ($editarEmpresa ? "nueva-empresa" : 
 <html lang="es">
 <head>
 <meta charset="UTF-8">
+<link rel="icon" type="image/png" href="favicon.png?v=<?php echo time(); ?>">
 <title>Registro de Pagos Empresas</title>
 <style>
 body{margin:0;font-family:Arial;background:#f3f6f4;color:#222}
