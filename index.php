@@ -72,6 +72,188 @@ function registrarAuditoria($auditoriaFile, $accion, $detalle) {
     guardarJson($auditoriaFile, $auditoria);
 }
 
+function dbConfigValor($constante, $env, $default = "") {
+    if (defined($constante)) return constant($constante);
+    foreach ((array)$env as $nombreEnv) {
+        $valor = getenv($nombreEnv);
+        if ($valor !== false && $valor !== "") return $valor;
+    }
+    return $default;
+}
+
+function conexionAcuerdos(&$error = null) {
+    static $pdo = null;
+    static $intentado = false;
+    static $ultimoError = null;
+
+    if ($pdo instanceof PDO) return $pdo;
+    if ($intentado) {
+        $error = $ultimoError;
+        return null;
+    }
+
+    $intentado = true;
+    $host = dbConfigValor("DB_HOST", ["PAGOS_DB_HOST", "MYSQL_HOST", "DB_HOST"], "localhost");
+    $puerto = dbConfigValor("DB_PORT", ["PAGOS_DB_PORT", "MYSQL_PORT", "DB_PORT"], "3306");
+    $db = dbConfigValor("DB_NAME", ["PAGOS_DB_NAME", "MYSQL_DATABASE", "DB_NAME"], "pagos_empresas");
+    $usuario = dbConfigValor("DB_USER", ["PAGOS_DB_USER", "MYSQL_USER", "DB_USER"], "root");
+    $password = dbConfigValor("DB_PASS", ["PAGOS_DB_PASS", "MYSQL_PASSWORD", "DB_PASS"], "");
+
+    try {
+        $dsn = "mysql:host={$host};port={$puerto};dbname={$db};charset=utf8mb4";
+        $pdo = new PDO($dsn, $usuario, $password, [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::ATTR_EMULATE_PREPARES => false
+        ]);
+        return $pdo;
+    } catch (Throwable $e) {
+        $ultimoError = "No se pudo conectar a MySQL para acuerdos: " . $e->getMessage();
+        $error = $ultimoError;
+        return null;
+    }
+}
+
+function normalizarAcuerdoSql($fila) {
+    $ids = $fila["pagos_previos_ids"] ?? [];
+    if (is_string($ids)) {
+        $decodificado = json_decode($ids, true);
+        $ids = is_array($decodificado) ? $decodificado : array_filter(array_map("trim", explode(",", $ids)));
+    }
+
+    return [
+        "id" => $fila["id"] ?? null,
+        "empresa_id" => (string)($fila["empresa_id"] ?? ""),
+        "tipo" => (string)($fila["tipo"] ?? ""),
+        "monto_total" => floatval($fila["monto_total"] ?? 0),
+        "cantidad_cuotas" => intval($fila["cantidad_cuotas"] ?? 1),
+        "monto_cuota" => floatval($fila["monto_cuota"] ?? 0),
+        "cuotas_pagadas_previas" => intval($fila["cuotas_pagadas_previas"] ?? 0),
+        "pagos_previos_ids" => array_values(array_unique(array_filter(array_map("strval", is_array($ids) ? $ids : []), fn($id) => $id !== ""))),
+        "periodo_desde" => periodoParaInput($fila["periodo_desde"] ?? ""),
+        "periodo_hasta" => periodoParaInput($fila["periodo_hasta"] ?? ""),
+        "observaciones" => $fila["observaciones"] ?? "",
+        "activa" => intval($fila["activa"] ?? 1) === 1
+    ];
+}
+
+function acuerdosSql(&$error = null) {
+    $pdo = conexionAcuerdos($error);
+    if (!$pdo) return null;
+
+    try {
+        $stmt = $pdo->query("SELECT id, empresa_id, tipo, monto_total, cantidad_cuotas, monto_cuota, cuotas_pagadas_previas, periodo_desde, periodo_hasta, pagos_previos_ids, fecha_carga_acuerdo, usuario_carga_acuerdo, observaciones, activa, fecha_creacion, fecha_actualizacion FROM acuerdos WHERE activa = 1 ORDER BY fecha_actualizacion DESC, fecha_creacion DESC, id DESC");
+        return array_map("normalizarAcuerdoSql", $stmt->fetchAll());
+    } catch (Throwable $e) {
+        $error = "No se pudieron leer los acuerdos desde MySQL: " . $e->getMessage();
+        return null;
+    }
+}
+
+function aplicarAcuerdosSqlAEmpresas($empresas, &$error = null) {
+    $acuerdos = acuerdosSql($error);
+    if ($acuerdos === null) return $empresas;
+
+    $porEmpresaTipo = [];
+    foreach ($acuerdos as $acuerdo) {
+        $empresaId = $acuerdo["empresa_id"] ?? "";
+        $tipo = $acuerdo["tipo"] ?? "";
+        if ($empresaId === "" || $tipo === "" || isset($porEmpresaTipo[$empresaId][$tipo])) continue;
+        $porEmpresaTipo[$empresaId][$tipo] = $acuerdo;
+    }
+
+    foreach ($empresas as $indice => $empresa) {
+        $empresaId = $empresa["id"] ?? "";
+        if ($empresaId === "" || empty($porEmpresaTipo[$empresaId])) continue;
+        foreach ($porEmpresaTipo[$empresaId] as $tipo => $acuerdo) {
+            if (!isset($empresas[$indice]["acuerdos"]) || !is_array($empresas[$indice]["acuerdos"])) {
+                $empresas[$indice]["acuerdos"] = [];
+            }
+            if (!empty($acuerdo["activa"])) {
+                $empresas[$indice]["acuerdos"][$tipo] = $acuerdo;
+            } else {
+                unset($empresas[$indice]["acuerdos"][$tipo]);
+            }
+        }
+    }
+
+    return $empresas;
+}
+
+function acuerdoActivoSql($empresaId, $tipo, &$error = null) {
+    $pdo = conexionAcuerdos($error);
+    if (!$pdo) return null;
+
+    try {
+        $stmt = $pdo->prepare("SELECT id, empresa_id, tipo, monto_total, cantidad_cuotas, monto_cuota, cuotas_pagadas_previas, periodo_desde, periodo_hasta, pagos_previos_ids, fecha_carga_acuerdo, usuario_carga_acuerdo, observaciones, activa, fecha_creacion, fecha_actualizacion FROM acuerdos WHERE empresa_id = :empresa_id AND tipo = :tipo AND activa = 1 ORDER BY fecha_actualizacion DESC, fecha_creacion DESC, id DESC LIMIT 1");
+        $stmt->execute(["empresa_id" => $empresaId, "tipo" => $tipo]);
+        $fila = $stmt->fetch();
+        return $fila ? normalizarAcuerdoSql($fila) : null;
+    } catch (Throwable $e) {
+        $error = "No se pudo consultar el acuerdo activo: " . $e->getMessage();
+        return null;
+    }
+}
+
+function guardarAcuerdoSql($datos, &$editado = false, &$error = null) {
+    $pdo = conexionAcuerdos($error);
+    if (!$pdo) return false;
+
+    $existente = acuerdoActivoSql($datos["empresa_id"], $datos["tipo"], $error);
+    if ($error !== null && $existente === null) return false;
+
+    $params = [
+        "empresa_id" => $datos["empresa_id"],
+        "tipo" => $datos["tipo"],
+        "monto_total" => $datos["monto_total"],
+        "cantidad_cuotas" => $datos["cantidad_cuotas"],
+        "monto_cuota" => $datos["monto_cuota"],
+        "cuotas_pagadas_previas" => $datos["cuotas_pagadas_previas"],
+        "periodo_desde" => $datos["periodo_desde"],
+        "periodo_hasta" => $datos["periodo_hasta"],
+        "pagos_previos_ids" => json_encode(array_values($datos["pagos_previos_ids"]), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        "observaciones" => $datos["observaciones"],
+        "fecha_actualizacion" => date("Y-m-d H:i:s")
+    ];
+
+    try {
+        if ($existente) {
+            $editado = true;
+            $params["id"] = $existente["id"];
+            $stmt = $pdo->prepare("UPDATE acuerdos SET empresa_id = :empresa_id, tipo = :tipo, monto_total = :monto_total, cantidad_cuotas = :cantidad_cuotas, monto_cuota = :monto_cuota, cuotas_pagadas_previas = :cuotas_pagadas_previas, periodo_desde = :periodo_desde, periodo_hasta = :periodo_hasta, pagos_previos_ids = :pagos_previos_ids, observaciones = :observaciones, activa = 1, fecha_actualizacion = :fecha_actualizacion WHERE id = :id");
+            return $stmt->execute($params);
+        }
+
+        $editado = false;
+        $params["fecha_carga_acuerdo"] = date("Y-m-d H:i:s");
+        $params["usuario_carga_acuerdo"] = usuarioActual() ?: "SISTEMA";
+        $params["fecha_creacion"] = date("Y-m-d H:i:s");
+        $stmt = $pdo->prepare("INSERT INTO acuerdos (empresa_id, tipo, monto_total, cantidad_cuotas, monto_cuota, cuotas_pagadas_previas, periodo_desde, periodo_hasta, pagos_previos_ids, fecha_carga_acuerdo, usuario_carga_acuerdo, observaciones, activa, fecha_creacion, fecha_actualizacion) VALUES (:empresa_id, :tipo, :monto_total, :cantidad_cuotas, :monto_cuota, :cuotas_pagadas_previas, :periodo_desde, :periodo_hasta, :pagos_previos_ids, :fecha_carga_acuerdo, :usuario_carga_acuerdo, :observaciones, 1, :fecha_creacion, :fecha_actualizacion)");
+        return $stmt->execute($params);
+    } catch (Throwable $e) {
+        $error = "No se pudo guardar el acuerdo en MySQL: " . $e->getMessage();
+        return false;
+    }
+}
+
+function eliminarAcuerdoSql($empresaId, $tipo, &$error = null) {
+    $pdo = conexionAcuerdos($error);
+    if (!$pdo) return false;
+
+    try {
+        $stmt = $pdo->prepare("UPDATE acuerdos SET activa = 0, fecha_actualizacion = :fecha_actualizacion WHERE empresa_id = :empresa_id AND tipo = :tipo AND activa = 1");
+        $stmt->execute([
+            "empresa_id" => $empresaId,
+            "tipo" => $tipo,
+            "fecha_actualizacion" => date("Y-m-d H:i:s")
+        ]);
+        return $stmt->rowCount() > 0;
+    } catch (Throwable $e) {
+        $error = "No se pudo eliminar el acuerdo en MySQL: " . $e->getMessage();
+        return false;
+    }
+}
+
 function detalleEmpresa($empresa) {
     $razon = trim($empresa["razon"] ?? "Empresa");
     $cuit = trim($empresa["cuit"] ?? "");
@@ -618,6 +800,8 @@ $empresas = leerJson($empresasFile);
 $pagos = leerJson($pagosFile);
 $auditoria = leerJson($auditoriaFile);
 $papeleraPagos = leerJson($papeleraPagosFile);
+$errorAcuerdosSql = null;
+$empresas = aplicarAcuerdosSqlAEmpresas($empresas, $errorAcuerdosSql);
 $errorEmpresa = "";
 $coincidenciasEmpresa = ["cuit" => null, "exacta" => null, "parecidas" => []];
 $advertenciaEmpresa = false;
@@ -806,6 +990,7 @@ if (isset($_POST["guardar_acuerdo"])) {
         : [];
     $periodoDesdeAcuerdo = trim($_POST["acuerdo_periodo_desde"] ?? "");
     $periodoHastaAcuerdo = trim($_POST["acuerdo_periodo_hasta"] ?? "");
+    $empresaAuditada = buscarEmpresa($empresas, $empresaIdAcuerdo);
     $pagosPreviosValidos = pagosPreviosVinculados(
         ["pagos_previos_ids" => $pagosPreviosIdsAcuerdo],
         $pagos,
@@ -815,6 +1000,8 @@ if (isset($_POST["guardar_acuerdo"])) {
 
     if ($empresaIdAcuerdo === "") {
         $errorEmpresa = "Seleccioná una empresa para cargar el acuerdo.";
+    } elseif (!$empresaAuditada) {
+        $errorEmpresa = "Selecciona una empresa valida para cargar el acuerdo.";
     } elseif (!in_array($tipoAcuerdo, ["Obra Social","Sindicato","Mutual"], true)) {
         $errorEmpresa = "Seleccioná un tipo de acuerdo válido.";
     } elseif ($montoTotalAcuerdo <= 0) {
@@ -845,29 +1032,26 @@ if (isset($_POST["guardar_acuerdo"])) {
 
     if ($errorEmpresa === "") {
         $acuerdoEditado = false;
-        $empresaAuditada = null;
-        foreach ($empresas as $k => $emp) {
-            if (($emp["id"] ?? "") === $empresaIdAcuerdo) {
-                $empresaAuditada = $emp;
-                $acuerdoEditado = isset($emp["acuerdos"]) && is_array($emp["acuerdos"]) && isset($emp["acuerdos"][$tipoAcuerdo]);
-                if (!isset($empresas[$k]["acuerdos"]) || !is_array($empresas[$k]["acuerdos"])) {
-                    $empresas[$k]["acuerdos"] = [];
-                }
-                $empresas[$k]["acuerdos"][$tipoAcuerdo] = [
-                    "monto_total" => $montoTotalAcuerdo,
-                    "cantidad_cuotas" => $cantidadCuotasAcuerdo,
-                    "monto_cuota" => $montoCuotaAcuerdo,
-                    "cuotas_pagadas_previas" => $cuotasPreviasAcuerdo,
-                    "pagos_previos_ids" => $pagosPreviosIdsAcuerdo,
-                    "periodo_desde" => $periodoDesdeAcuerdo,
-                    "periodo_hasta" => $periodoHastaAcuerdo,
-                    "observaciones" => trim($_POST["acuerdo_observaciones"] ?? "")
-                ];
-                break;
-            }
-        }
+        $errorGuardarAcuerdo = null;
+        $guardadoAcuerdo = guardarAcuerdoSql([
+            "empresa_id" => $empresaIdAcuerdo,
+            "tipo" => $tipoAcuerdo,
+            "monto_total" => $montoTotalAcuerdo,
+            "cantidad_cuotas" => $cantidadCuotasAcuerdo,
+            "monto_cuota" => $montoCuotaAcuerdo,
+            "cuotas_pagadas_previas" => $cuotasPreviasAcuerdo,
+            "pagos_previos_ids" => $pagosPreviosIdsAcuerdo,
+            "periodo_desde" => $periodoDesdeAcuerdo,
+            "periodo_hasta" => $periodoHastaAcuerdo,
+            "observaciones" => trim($_POST["acuerdo_observaciones"] ?? "")
+        ], $acuerdoEditado, $errorGuardarAcuerdo);
 
-        guardarJson($empresasFile, $empresas);
+        if (!$guardadoAcuerdo) {
+            $errorEmpresa = $errorGuardarAcuerdo ?: "No se pudo guardar el acuerdo en MySQL.";
+        }
+    }
+
+    if ($errorEmpresa === "" && !empty($guardadoAcuerdo)) {
         registrarAuditoria(
             $auditoriaFile,
             $acuerdoEditado ? "editar_acuerdo" : "crear_acuerdo",
@@ -1111,15 +1295,11 @@ if (isset($_GET["eliminar_acuerdo"], $_GET["tipo_acuerdo"])) {
     $tipoAcuerdoEliminar = $_GET["tipo_acuerdo"];
 
     if (in_array($tipoAcuerdoEliminar, ["Obra Social", "Sindicato", "Mutual"], true)) {
-        foreach ($empresas as $k => $empresa) {
-            if (($empresa["id"] ?? "") !== $empresaId) continue;
-            if (isset($empresas[$k]["acuerdos"]) && is_array($empresas[$k]["acuerdos"])) {
-                unset($empresas[$k]["acuerdos"][$tipoAcuerdoEliminar]);
-            }
-            registrarAuditoria($auditoriaFile, "eliminar_acuerdo", "Eliminó acuerdo de " . (($empresas[$k]["razon"] ?? "Empresa") . " - " . $tipoAcuerdoEliminar));
-            break;
+        $empresaEliminadaAcuerdo = buscarEmpresa($empresas, $empresaId);
+        $errorEliminarAcuerdo = null;
+        if (eliminarAcuerdoSql($empresaId, $tipoAcuerdoEliminar, $errorEliminarAcuerdo)) {
+            registrarAuditoria($auditoriaFile, "eliminar_acuerdo", "Eliminó acuerdo de " . (($empresaEliminadaAcuerdo["razon"] ?? "Empresa") . " - " . $tipoAcuerdoEliminar));
         }
-        guardarJson($empresasFile, $empresas);
     }
 
     $destino = ($_GET["origen"] ?? "") === "ficha" ? "buscar-empresa" : "cargar-acuerdo";
