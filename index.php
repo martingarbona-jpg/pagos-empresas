@@ -101,6 +101,8 @@ function normalizarAcuerdoSql($fila) {
         "pagos_previos_ids" => array_values(array_unique(array_filter(array_map("strval", is_array($ids) ? $ids : []), fn($id) => $id !== ""))),
         "periodo_desde" => periodoParaInput($fila["periodo_desde"] ?? ""),
         "periodo_hasta" => periodoParaInput($fila["periodo_hasta"] ?? ""),
+        "fecha_carga_acuerdo" => $fila["fecha_carga_acuerdo"] ?? "",
+        "usuario_carga_acuerdo" => $fila["usuario_carga_acuerdo"] ?? "",
         "observaciones" => $fila["observaciones"] ?? "",
         "activa" => intval($fila["activa"] ?? 1) === 1
     ];
@@ -319,6 +321,44 @@ function periodoAIndice($periodo) {
     if (!periodoValido($periodo)) return null;
     [$mes, $anio] = array_map('intval', explode('/', $periodo));
     return (2000 + $anio) * 12 + $mes;
+}
+
+function periodoDesdeIndice($indice) {
+    $anioCompleto = intdiv($indice - 1, 12);
+    $mes = $indice - $anioCompleto * 12;
+    return str_pad((string)$mes, 2, "0", STR_PAD_LEFT) . "/" . substr((string)$anioCompleto, -2);
+}
+
+function fechaBaseAcuerdo($acuerdo) {
+    $fecha = trim($acuerdo["fecha_carga_acuerdo"] ?? "");
+    if ($fecha === "") return null;
+    try {
+        return new DateTimeImmutable(substr($fecha, 0, 10));
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function fechaVencimientoCuotaAcuerdo($acuerdo, $numeroCuota) {
+    $base = fechaBaseAcuerdo($acuerdo);
+    if (!$base || $numeroCuota < 1) return "";
+
+    $diaBase = intval($base->format("d"));
+    $mesBase = intval($base->format("m"));
+    $anioBase = intval($base->format("Y"));
+    $mesTotal = $mesBase + $numeroCuota - 1;
+    $anio = $anioBase + intdiv($mesTotal - 1, 12);
+    $mes = (($mesTotal - 1) % 12) + 1;
+    $ultimoDia = cal_days_in_month(CAL_GREGORIAN, $mes, $anio);
+    $dia = min($diaBase, $ultimoDia);
+
+    return sprintf("%04d-%02d-%02d", $anio, $mes, $dia);
+}
+
+function periodoCuotaAcuerdo($acuerdo, $numeroCuota) {
+    $desde = periodoAIndice(periodoParaInput($acuerdo["periodo_desde"] ?? ""));
+    if ($desde === null || $numeroCuota < 1) return "";
+    return periodoDesdeIndice($desde + $numeroCuota - 1);
 }
 
 function rutaComprobanteFisico($comprobante, $uploadDir) {
@@ -621,6 +661,8 @@ function acuerdoDefault() {
         "pagos_previos_ids" => [],
         "periodo_desde" => "",
         "periodo_hasta" => "",
+        "fecha_carga_acuerdo" => "",
+        "usuario_carga_acuerdo" => "",
         "observaciones" => ""
     ];
 }
@@ -670,6 +712,76 @@ function periodoEsCuotaPrevia($acuerdo, $periodo) {
     if ($consultado === null || $desde === null) return false;
     $numeroCuota = $consultado - $desde + 1;
     return $numeroCuota >= 1 && $numeroCuota <= $previas;
+}
+
+function usuarioPuedeVerAlertaAcuerdo($acuerdo, $usuario) {
+    if ($usuario === "ADMIN") return true;
+    $responsable = trim($acuerdo["usuario_carga_acuerdo"] ?? "");
+    return $responsable !== "" && $responsable === $usuario;
+}
+
+function cuotaAcuerdoPagada($acuerdo, $empresaId, $tipo, $numeroCuota, $periodo, $pagos, $empresas) {
+    $previas = max(intval($acuerdo["cuotas_pagadas_previas"] ?? 0), 0);
+    if ($numeroCuota <= $previas) return true;
+
+    $idsPrevios = array_flip(pagosPreviosIdsAcuerdo($acuerdo));
+    foreach ($pagos as $pago) {
+        if (($pago["empresa_id"] ?? "") !== $empresaId || ($pago["tipo"] ?? "") !== $tipo) continue;
+        if (periodoParaInput($pago["periodo"] ?? "") !== $periodo) continue;
+
+        if (isset($idsPrevios[(string)($pago["id"] ?? "")])) {
+            return true;
+        }
+
+        if (tipoPagoCompatible($pago, $empresas) === "Cuota de acuerdo") {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function alertasCuotasAcuerdo($empresas, $pagos, $usuario) {
+    $hoy = date("Y-m-d");
+    $alertas = [];
+
+    foreach ($empresas as $empresa) {
+        $empresaId = $empresa["id"] ?? "";
+        if ($empresaId === "") continue;
+
+        foreach (["Obra Social", "Sindicato", "Mutual"] as $tipo) {
+            if (!acuerdoValidoEmpresaTipo($empresa, $tipo)) continue;
+
+            $acuerdo = acuerdoEmpresa($empresa, $tipo);
+            if (!usuarioPuedeVerAlertaAcuerdo($acuerdo, $usuario)) continue;
+
+            $cantidad = max(intval($acuerdo["cantidad_cuotas"] ?? 0), 0);
+            for ($numero = 1; $numero <= $cantidad; $numero++) {
+                $fechaVencimiento = fechaVencimientoCuotaAcuerdo($acuerdo, $numero);
+                if ($fechaVencimiento === "" || $fechaVencimiento > $hoy) continue;
+
+                $periodo = periodoCuotaAcuerdo($acuerdo, $numero);
+                if ($periodo === "") continue;
+                if (cuotaAcuerdoPagada($acuerdo, $empresaId, $tipo, $numero, $periodo, $pagos, $empresas)) continue;
+
+                $alertas[] = [
+                    "empresa_id" => $empresaId,
+                    "empresa" => $empresa["razon"] ?? "Empresa",
+                    "tipo" => $tipo,
+                    "numero" => $numero,
+                    "cantidad" => $cantidad,
+                    "periodo" => $periodo,
+                    "fecha_vencimiento" => $fechaVencimiento,
+                    "monto_cuota" => max(floatval($acuerdo["monto_cuota"] ?? 0), 0),
+                    "usuario_responsable" => trim($acuerdo["usuario_carga_acuerdo"] ?? ""),
+                    "estado" => $fechaVencimiento === $hoy ? "Vence hoy" : "Vencida"
+                ];
+            }
+        }
+    }
+
+    usort($alertas, fn($a, $b) => strcmp($a["fecha_vencimiento"], $b["fecha_vencimiento"]) ?: strcmp($a["empresa"], $b["empresa"]));
+    return $alertas;
 }
 
 function tipoPagoCompatible($pago, $empresas) {
@@ -1421,6 +1533,11 @@ foreach ($pagos as $pago) {
 }
 usort($chequesAlertas, fn($a, $b) => strcmp($a["fecha_cobro"], $b["fecha_cobro"]));
 $cantidadAlertasCheques = count($chequesAlertas);
+$cuotasAcuerdoAlertas = alertasCuotasAcuerdo($empresas, $pagos, usuarioActual());
+$cuotasAcuerdoVencenHoy = count(array_filter($cuotasAcuerdoAlertas, fn($alerta) => $alerta["estado"] === "Vence hoy"));
+$cuotasAcuerdoVencidas = count(array_filter($cuotasAcuerdoAlertas, fn($alerta) => $alerta["estado"] === "Vencida"));
+$cantidadAlertasCuotasAcuerdo = count($cuotasAcuerdoAlertas);
+$cantidadAlertasCampanita = $cantidadAlertasCheques + $cantidadAlertasCuotasAcuerdo;
 $tabInicial = $editarPago
     ? "cargar-pago"
     : ($editarEmpresa
@@ -1444,12 +1561,16 @@ header a{color:white;text-decoration:none;font-weight:bold}
 .usuario-header{font-weight:bold;color:#eaf7f0}
 .notificaciones{position:relative}
 .notificaciones-toggle{width:auto;background:#fff;color:#087a46;padding:8px 11px}
-.notificaciones-panel{display:none;position:absolute;right:0;top:calc(100% + 10px);width:min(380px,90vw);max-height:70vh;overflow:auto;background:white;color:#222;border-radius:12px;box-shadow:0 10px 30px #0004;padding:12px;z-index:30}
+.notificaciones-panel{display:none;position:absolute;right:0;top:calc(100% + 10px);width:min(520px,92vw);max-height:70vh;overflow:auto;background:white;color:#222;border-radius:12px;box-shadow:0 10px 30px #0004;padding:12px;z-index:30}
 .notificaciones.abierta .notificaciones-panel{display:block}
-.notificacion-cheque{padding:10px 0;border-bottom:1px solid #ddd}
-.notificacion-cheque:last-child{border-bottom:0}
-.notificacion-cheque form{margin-top:8px}
-.notificacion-cheque button{width:auto;padding:7px 10px}
+.notificaciones-seccion{padding-bottom:12px;margin-bottom:12px;border-bottom:1px solid #dcefe6}
+.notificaciones-seccion:last-child{padding-bottom:0;margin-bottom:0;border-bottom:0}
+.notificaciones-seccion h3{margin:0 0 8px;color:#087a46;font-size:16px}
+.notificacion-item{padding:10px 0;border-bottom:1px solid #eee}
+.notificacion-item:last-child{border-bottom:0}
+.notificacion-item form{margin-top:8px}
+.notificacion-item button{width:auto;padding:7px 10px}
+.notificacion-meta{font-size:13px;color:#555;margin-top:3px}
 main{padding:20px}
 .tabs{display:flex;flex-wrap:wrap;gap:8px;background:white;padding:12px 20px;border-bottom:1px solid #dcefe6;position:sticky;top:0;z-index:5}
 .tab-btn{width:auto;background:#eaf7f0;color:#087a46;border:1px solid #b9dfcc;padding:10px 13px}
@@ -1477,7 +1598,7 @@ main{padding:20px}
 .card.is-collapsed .card-body{display:none}
 .quick-actions{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px}
 .quick-actions button{width:auto}
-.resumen{display:grid;grid-template-columns:repeat(6,1fr);gap:15px}
+.resumen{display:grid;grid-template-columns:repeat(7,1fr);gap:15px}
 .box{background:#eaf7f0;padding:18px;border-radius:14px}
 .label{font-size:14px;color:#555}
 .num{font-size:26px;font-weight:bold;color:#087a46;margin-top:5px}
@@ -1602,14 +1723,15 @@ th{background:#087a46;color:white}
 <h1>Registro de Pagos - Empresas Deudoras</h1>
 <div class="header-actions">
 <div class="notificaciones" id="notificacionesCheques">
-<button type="button" class="notificaciones-toggle" id="notificacionesToggle" aria-expanded="false" aria-controls="notificacionesPanel">&#x1F514; <?= e($cantidadAlertasCheques) ?></button>
+<button type="button" class="notificaciones-toggle" id="notificacionesToggle" aria-expanded="false" aria-controls="notificacionesPanel">&#x1F514; <?= e($cantidadAlertasCampanita) ?></button>
 <div class="notificaciones-panel" id="notificacionesPanel">
-<strong>Cheques por atender</strong>
+<div class="notificaciones-seccion">
+<h3>Cheques por cobrar</h3>
 <?php if(empty($chequesAlertas)): ?>
 <p class="sin">No hay cheques vencidos ni que venzan hoy.</p>
 <?php endif; ?>
 <?php foreach($chequesAlertas as $alertaCheque): ?>
-<div class="notificacion-cheque">
+<div class="notificacion-item">
 <div><strong><?= e($alertaCheque["empresa"]) ?></strong></div>
 <div><?= e(fechaParaMostrar($alertaCheque["fecha_cobro"])) ?></div>
 <div><span class="estado <?= $alertaCheque["estado"] === "Vencido" ? "estado-deudor" : "estado-parcial" ?>"><?= e($alertaCheque["estado"]) ?></span></div>
@@ -1620,6 +1742,25 @@ th{background:#087a46;color:white}
 </form>
 </div>
 <?php endforeach; ?>
+</div>
+<div class="notificaciones-seccion">
+<h3>Cuotas de acuerdo por cobrar</h3>
+<?php if(empty($cuotasAcuerdoAlertas)): ?>
+<p class="sin">No hay cuotas de acuerdo vencidas ni que venzan hoy.</p>
+<?php endif; ?>
+<?php foreach($cuotasAcuerdoAlertas as $alertaCuota): ?>
+<div class="notificacion-item">
+<div><strong><?= e($alertaCuota["empresa"]) ?></strong></div>
+<div class="notificacion-meta">Tipo: <?= e($alertaCuota["tipo"]) ?></div>
+<div class="notificacion-meta">Cuota <?= e($alertaCuota["numero"]) ?> de <?= e($alertaCuota["cantidad"]) ?> - Periodo <?= e($alertaCuota["periodo"]) ?></div>
+<div class="notificacion-meta">Vencimiento: <?= e(fechaParaMostrar($alertaCuota["fecha_vencimiento"])) ?></div>
+<div class="notificacion-meta">Monto: <?= dinero($alertaCuota["monto_cuota"]) ?></div>
+<div class="notificacion-meta">Responsable: <?= e($alertaCuota["usuario_responsable"] ?: "Sin responsable") ?></div>
+<div><span class="estado <?= $alertaCuota["estado"] === "Vencida" ? "estado-deudor" : "estado-parcial" ?>"><?= e($alertaCuota["estado"]) ?></span></div>
+<button type="button" class="cargar-pago-alerta-cuota" data-empresa="<?= e($alertaCuota["empresa_id"]) ?>" data-tipo="<?= e($alertaCuota["tipo"]) ?>" data-periodo="<?= e($alertaCuota["periodo"]) ?>" data-monto="<?= e($alertaCuota["monto_cuota"]) ?>">Cargar pago</button>
+</div>
+<?php endforeach; ?>
+</div>
 </div>
 </div>
 <span class="usuario-header">Usuario: <?= e(usuarioActual()) ?></span>
@@ -1656,6 +1797,7 @@ th{background:#087a46;color:white}
 <div class="box"><div class="label">Total cobrado general</div><div class="num"><?= dinero($totalCobrado) ?></div></div>
 <div class="box"><div class="label">Deudores <?= e($periodoActual) ?></div><div class="num"><?= e($deudoresPeriodoActual) ?></div></div>
 <div class="box"><div class="label">Cheques pendientes</div><div>Vencen hoy: <strong><?= e($chequesVencenHoy) ?></strong></div><div>Vencidos: <strong><?= e($chequesVencidos) ?></strong></div></div>
+<div class="box"><div class="label">Cuotas de acuerdo por cobrar</div><div>Vencen hoy: <strong><?= e($cuotasAcuerdoVencenHoy) ?></strong></div><div>Vencidas: <strong><?= e($cuotasAcuerdoVencidas) ?></strong></div></div>
 </div>
 
 <div class="card">
@@ -3111,6 +3253,75 @@ function periodoDesdeIndice(indice) {
     return String(mes).padStart(2, "0") + "/" + String(anioCompleto % 100).padStart(2, "0");
 }
 
+function fechaBaseAcuerdoCliente(acuerdo) {
+    const fecha = (acuerdo?.fecha_carga_acuerdo || "").toString().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) return null;
+    const [anio, mes, dia] = fecha.split("-").map(Number);
+    return { anio, mes, dia, iso: fecha };
+}
+
+function fechaVencimientoCuotaCliente(acuerdo, numeroCuota) {
+    const base = fechaBaseAcuerdoCliente(acuerdo);
+    if (!base || numeroCuota < 1) return "";
+    const mesBaseCero = base.mes - 1;
+    const fechaMes = new Date(base.anio, mesBaseCero + numeroCuota - 1, 1);
+    const anio = fechaMes.getFullYear();
+    const mes = fechaMes.getMonth();
+    const ultimoDia = new Date(anio, mes + 1, 0).getDate();
+    const dia = Math.min(base.dia, ultimoDia);
+    return `${anio}-${String(mes + 1).padStart(2, "0")}-${String(dia).padStart(2, "0")}`;
+}
+
+function fechaMostrarCliente(fechaIso) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fechaIso || "")) return "";
+    const [anio, mes, dia] = fechaIso.split("-");
+    return `${dia}/${mes}/${anio}`;
+}
+
+function hoyIsoCliente() {
+    const ahora = new Date();
+    return `${ahora.getFullYear()}-${String(ahora.getMonth() + 1).padStart(2, "0")}-${String(ahora.getDate()).padStart(2, "0")}`;
+}
+
+function periodoCuotaAcuerdoCliente(acuerdo, numeroCuota) {
+    const desde = periodoAMesIndice(acuerdo?.periodo_desde || "");
+    if (desde === null || numeroCuota < 1) return "";
+    return periodoDesdeIndice(desde + numeroCuota - 1);
+}
+
+function cuotaAcuerdoPagadaCliente(empresa, tipo, numeroCuota, periodo) {
+    const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
+    const previas = Math.max(Number(acuerdo.cuotas_pagadas_previas || 0), 0);
+    if (numeroCuota <= previas) return true;
+
+    const idsPrevios = new Set(pagosPreviosIdsCliente(empresa, tipo));
+    return pagosData.some((pago) =>
+        (pago.empresa_id || "") === (empresa.id || "") &&
+        (pago.tipo || "") === tipo &&
+        periodoNormalizado(pago.periodo || "") === periodo &&
+        (idsPrevios.has(String(pago.id || "")) || tipoPagoCompatibleCliente(pago, empresa, tipo) === "Cuota de acuerdo")
+    );
+}
+
+function proximaCuotaPendienteCliente(empresa, tipo) {
+    if (!tieneDatosAcuerdo(empresa, tipo)) return null;
+    const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
+    const cantidad = Math.max(Number(acuerdo.cantidad_cuotas || 0), 0);
+    const hoy = hoyIsoCliente();
+
+    for (let numero = 1; numero <= cantidad; numero += 1) {
+        const periodo = periodoCuotaAcuerdoCliente(acuerdo, numero);
+        if (!periodo || cuotaAcuerdoPagadaCliente(empresa, tipo, numero, periodo)) continue;
+        const vencimiento = fechaVencimientoCuotaCliente(acuerdo, numero);
+        let estado = "Al día";
+        if (vencimiento === hoy) estado = "Vence hoy";
+        if (vencimiento && vencimiento < hoy) estado = "Vencida";
+        return { numero, cantidad, periodo, vencimiento, estado, monto: Number(acuerdo.monto_cuota || 0) };
+    }
+
+    return null;
+}
+
 function acuerdoEmpresaTipo(empresa, tipo) {
     const base = {
         monto_total: 0,
@@ -3120,6 +3331,8 @@ function acuerdoEmpresaTipo(empresa, tipo) {
         pagos_previos_ids: [],
         periodo_desde: "",
         periodo_hasta: "",
+        fecha_carga_acuerdo: "",
+        usuario_carga_acuerdo: "",
         observaciones: ""
     };
     if (empresa?.acuerdos && empresa.acuerdos[tipo]) {
@@ -3586,17 +3799,26 @@ function resumenDetalleAcuerdo(empresa, tipo) {
     }
 
     const resumen = resumenCalculoAcuerdoCliente(empresa, tipo);
+    const proxima = proximaCuotaPendienteCliente(empresa, tipo);
+    const estadoClase = proxima?.estado === "Vencida" ? "estado-deudor" : (proxima?.estado === "Vence hoy" ? "estado-parcial" : "estado-ok");
+    const fechaBase = fechaBaseAcuerdoCliente(acuerdo)?.iso || "";
+    const responsable = acuerdo.usuario_carga_acuerdo || "";
 
     return `<div class="box">
 <div class="label">${escapeHtml(tipo)}</div>
 <div>Monto total acuerdo: ${dineroCliente(resumen.montoTotal)}</div>
 <div>Cuotas totales: ${resumen.cantidad}</div>
 <div>Monto cuota: ${dineroCliente(resumen.montoCuota)}</div>
+<div>Fecha base del acuerdo: ${fechaBase ? escapeHtml(fechaMostrarCliente(fechaBase)) : '<span class="sin">Sin fecha base</span>'}</div>
+<div>Responsable: ${responsable ? escapeHtml(responsable) : '<span class="sin">Sin responsable</span>'}</div>
 <div>Cuotas previas declaradas: ${resumen.previas}</div>
 <div>Pagos previos vinculados: ${resumen.pagosPrevios.length}</div>
 <div>Cuotas previas estimadas sin registro: ${resumen.previasSinRegistro}</div>
 <div>Cuotas de acuerdo registradas en sistema: ${resumen.pagosPosteriores.length}</div>
 <div>Cuotas pendientes: ${resumen.cuotasPendientes}</div>
+<div>Proxima cuota pendiente: ${proxima ? `Cuota ${proxima.numero} de ${proxima.cantidad} - ${escapeHtml(proxima.periodo)}` : '<span class="estado estado-ok">Sin cuotas pendientes</span>'}</div>
+<div>Fecha de vencimiento proxima cuota: ${proxima?.vencimiento ? escapeHtml(fechaMostrarCliente(proxima.vencimiento)) : '-'}</div>
+<div>Estado: <span class="estado ${estadoClase}">${escapeHtml(proxima?.estado || "Al dia")}</span></div>
 <div>Saldo pendiente del acuerdo: ${dineroCliente(resumen.saldo)}</div>
 <div style="margin-top:10px"><a class="btn-danger" href="?eliminar_acuerdo=${encodeURIComponent(empresa.id || "")}&tipo_acuerdo=${encodeURIComponent(tipo)}&origen=ficha" onclick="return confirm('¿Eliminar este acuerdo? No se eliminarán los pagos ya cargados.')" title="Eliminar acuerdo" aria-label="Eliminar acuerdo">🗑️</a></div>
 </div>`;
@@ -3727,7 +3949,7 @@ function ultimoPagoEmpresaTipo(empresaId, tipo) {
     return pagosTipo[0] || null;
 }
 
-function completarFormularioPago(empresaId, tipo, periodo, tipoPagoInicial = "Pago al día") {
+function completarFormularioPago(empresaId, tipo, periodo, tipoPagoInicial = "Pago al día", montoInicial = "") {
     if (buscarPagoDuplicado(empresaId, tipo, periodo, tipoPagoInicial)) {
         alert(mensajePagoDuplicado);
         return;
@@ -3763,6 +3985,10 @@ function completarFormularioPago(empresaId, tipo, periodo, tipoPagoInicial = "Pa
             periodoInput.value = periodo;
             periodoInput.dispatchEvent(new Event("input", { bubbles: true }));
         }
+        if (monto && montoInicial !== "") {
+            monto.value = montoInicial;
+            monto.dispatchEvent(new Event("input", { bubbles: true }));
+        }
         if (titulo) titulo.textContent = "Cargar pago";
         if (guardar) guardar.textContent = "Guardar pago";
         if (monto) monto.focus();
@@ -3786,6 +4012,20 @@ function completarFormularioAcuerdo(empresaId, tipo) {
 
     window.scrollTo({ top: 0, behavior: "smooth" });
 }
+
+document.querySelectorAll(".cargar-pago-alerta-cuota").forEach((boton) => {
+    boton.addEventListener("click", () => {
+        completarFormularioPago(
+            boton.dataset.empresa || "",
+            boton.dataset.tipo || "",
+            boton.dataset.periodo || "",
+            "Cuota de acuerdo",
+            boton.dataset.monto || ""
+        );
+        notificacionesCheques?.classList.remove("abierta");
+        notificacionesToggle?.setAttribute("aria-expanded", "false");
+    });
+});
 
 function cargarAcuerdoExistente() {
     const form = document.getElementById("acuerdoForm");
