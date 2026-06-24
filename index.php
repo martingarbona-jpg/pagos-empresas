@@ -759,6 +759,7 @@ function alertasCuotasAcuerdo($empresas, $pagos, $usuario) {
             for ($numero = 1; $numero <= $cantidad; $numero++) {
                 $fechaVencimiento = fechaVencimientoCuotaAcuerdo($acuerdo, $numero);
                 if ($fechaVencimiento === "" || $fechaVencimiento > $hoy) continue;
+                if ($numero === 1 && $fechaVencimiento === $hoy && $fechaVencimiento === substr(trim($acuerdo["fecha_carga_acuerdo"] ?? ""), 0, 10)) continue;
 
                 $periodo = periodoCuotaAcuerdo($acuerdo, $numero);
                 if ($periodo === "") continue;
