@@ -135,17 +135,10 @@ function aplicarAcuerdosSqlAEmpresas($empresas, &$error = null) {
 
     foreach ($empresas as $indice => $empresa) {
         $empresaId = $empresa["id"] ?? "";
-        if ($empresaId === "" || empty($porEmpresaTipo[$empresaId])) continue;
-        foreach ($porEmpresaTipo[$empresaId] as $tipo => $acuerdo) {
-            if (!isset($empresas[$indice]["acuerdos"]) || !is_array($empresas[$indice]["acuerdos"])) {
-                $empresas[$indice]["acuerdos"] = [];
-            }
-            if (!empty($acuerdo["activa"])) {
-                $empresas[$indice]["acuerdos"][$tipo] = $acuerdo;
-            } else {
-                unset($empresas[$indice]["acuerdos"][$tipo]);
-            }
-        }
+        $empresas[$indice]["_acuerdos_sql_leidos"] = true;
+        $empresas[$indice]["acuerdos"] = $empresaId !== "" && isset($porEmpresaTipo[$empresaId])
+            ? $porEmpresaTipo[$empresaId]
+            : [];
     }
 
     return $empresas;
@@ -212,12 +205,8 @@ function eliminarAcuerdoSql($empresaId, $tipo, &$error = null) {
     if (!$pdo) return false;
 
     try {
-        $stmt = $pdo->prepare("UPDATE acuerdos SET activa = 0, fecha_actualizacion = :fecha_actualizacion WHERE empresa_id = :empresa_id AND tipo = :tipo AND activa = 1");
-        $stmt->execute([
-            "empresa_id" => $empresaId,
-            "tipo" => $tipo,
-            "fecha_actualizacion" => date("Y-m-d H:i:s")
-        ]);
+        $stmt = $pdo->prepare("UPDATE acuerdos SET activa = 0, fecha_actualizacion = NOW() WHERE empresa_id = ? AND tipo = ? AND activa = 1");
+        $stmt->execute([$empresaId, $tipo]);
         return $stmt->rowCount() > 0;
     } catch (Throwable $e) {
         $error = "No se pudo eliminar el acuerdo en MySQL: " . $e->getMessage();
@@ -671,6 +660,10 @@ function acuerdoEmpresa($empresa, $tipo) {
     $base = acuerdoDefault();
     if (isset($empresa["acuerdos"]) && is_array($empresa["acuerdos"]) && isset($empresa["acuerdos"][$tipo]) && is_array($empresa["acuerdos"][$tipo])) {
         return array_merge($base, $empresa["acuerdos"][$tipo]);
+    }
+
+    if (!empty($empresa["_acuerdos_sql_leidos"])) {
+        return $base;
     }
 
     if (!empty($empresa["monto_total"]) || !empty($empresa["monto_cuota"]) || !empty($empresa["periodo_desde"]) || !empty($empresa["periodo_hasta"])) {
@@ -3338,6 +3331,9 @@ function acuerdoEmpresaTipo(empresa, tipo) {
     };
     if (empresa?.acuerdos && empresa.acuerdos[tipo]) {
         return { ...base, ...empresa.acuerdos[tipo] };
+    }
+    if (empresa?._acuerdos_sql_leidos) {
+        return base;
     }
     return {
         ...base,
