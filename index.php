@@ -108,12 +108,13 @@ function normalizarAcuerdoSql($fila) {
     ];
 }
 
-function acuerdosSql(&$error = null) {
+function acuerdosSql(&$error = null, $soloActivos = true) {
     $pdo = conexionAcuerdos($error);
     if (!$pdo) return null;
 
     try {
-        $stmt = $pdo->query("SELECT id, empresa_id, tipo, monto_total, cantidad_cuotas, monto_cuota, cuotas_pagadas_previas, periodo_desde, periodo_hasta, pagos_previos_ids, fecha_carga_acuerdo, usuario_carga_acuerdo, observaciones, activa, fecha_creacion, fecha_actualizacion FROM acuerdos WHERE activa = 1 ORDER BY fecha_actualizacion DESC, fecha_creacion DESC, id DESC");
+        $where = $soloActivos ? "WHERE activa = 1" : "";
+        $stmt = $pdo->query("SELECT id, empresa_id, tipo, monto_total, cantidad_cuotas, monto_cuota, cuotas_pagadas_previas, periodo_desde, periodo_hasta, pagos_previos_ids, fecha_carga_acuerdo, usuario_carga_acuerdo, observaciones, activa, fecha_creacion, fecha_actualizacion FROM acuerdos $where ORDER BY activa DESC, fecha_actualizacion DESC, fecha_creacion DESC, id DESC");
         return array_map("normalizarAcuerdoSql", $stmt->fetchAll());
     } catch (Throwable $e) {
         $error = "No se pudieron leer los acuerdos desde MySQL: " . $e->getMessage();
@@ -121,9 +122,15 @@ function acuerdosSql(&$error = null) {
     }
 }
 
+function acuerdosHistoricosSql(&$error = null) {
+    return acuerdosSql($error, false);
+}
+
 function aplicarAcuerdosSqlAEmpresas($empresas, &$error = null) {
-    $acuerdos = acuerdosSql($error);
+    $acuerdos = acuerdosSql($error, true);
     if ($acuerdos === null) return $empresas;
+    $todosLosAcuerdos = acuerdosHistoricosSql($error);
+    if ($todosLosAcuerdos === null) return $empresas;
 
     $porEmpresaTipo = [];
     foreach ($acuerdos as $acuerdo) {
@@ -133,11 +140,22 @@ function aplicarAcuerdosSqlAEmpresas($empresas, &$error = null) {
         $porEmpresaTipo[$empresaId][$tipo] = $acuerdo;
     }
 
+    $historicosPorEmpresaTipo = [];
+    foreach ($todosLosAcuerdos as $acuerdo) {
+        $empresaId = $acuerdo["empresa_id"] ?? "";
+        $tipo = $acuerdo["tipo"] ?? "";
+        if ($empresaId === "" || $tipo === "") continue;
+        $historicosPorEmpresaTipo[$empresaId][$tipo][] = $acuerdo;
+    }
+
     foreach ($empresas as $indice => $empresa) {
         $empresaId = $empresa["id"] ?? "";
         $empresas[$indice]["_acuerdos_sql_leidos"] = true;
         $empresas[$indice]["acuerdos"] = $empresaId !== "" && isset($porEmpresaTipo[$empresaId])
             ? $porEmpresaTipo[$empresaId]
+            : [];
+        $empresas[$indice]["acuerdos_historial"] = $empresaId !== "" && isset($historicosPorEmpresaTipo[$empresaId])
+            ? $historicosPorEmpresaTipo[$empresaId]
             : [];
     }
 
@@ -159,12 +177,27 @@ function acuerdoActivoSql($empresaId, $tipo, &$error = null) {
     }
 }
 
-function guardarAcuerdoSql($datos, &$editado = false, &$error = null) {
+function guardarAcuerdoSql($datos, &$editado = false, &$error = null, &$pasoAnteriorAHistorico = false) {
     $pdo = conexionAcuerdos($error);
     if (!$pdo) return false;
 
-    $existente = acuerdoActivoSql($datos["empresa_id"], $datos["tipo"], $error);
-    if ($error !== null && $existente === null) return false;
+    $acuerdoId = trim((string)($datos["id"] ?? ""));
+    $existente = null;
+    if ($acuerdoId !== "") {
+        try {
+            $stmt = $pdo->prepare("SELECT id, empresa_id, tipo, monto_total, cantidad_cuotas, monto_cuota, cuotas_pagadas_previas, periodo_desde, periodo_hasta, pagos_previos_ids, fecha_carga_acuerdo, usuario_carga_acuerdo, observaciones, activa, fecha_creacion, fecha_actualizacion FROM acuerdos WHERE id = :id LIMIT 1");
+            $stmt->execute(["id" => $acuerdoId]);
+            $fila = $stmt->fetch();
+            $existente = $fila ? normalizarAcuerdoSql($fila) : null;
+            if (!$existente) {
+                $error = "No se encontro el acuerdo a editar.";
+                return false;
+            }
+        } catch (Throwable $e) {
+            $error = "No se pudo consultar el acuerdo a editar: " . $e->getMessage();
+            return false;
+        }
+    }
 
     $params = [
         "empresa_id" => $datos["empresa_id"],
@@ -181,20 +214,32 @@ function guardarAcuerdoSql($datos, &$editado = false, &$error = null) {
     ];
 
     try {
+        $pdo->beginTransaction();
         if ($existente) {
             $editado = true;
             $params["id"] = $existente["id"];
             $stmt = $pdo->prepare("UPDATE acuerdos SET empresa_id = :empresa_id, tipo = :tipo, monto_total = :monto_total, cantidad_cuotas = :cantidad_cuotas, monto_cuota = :monto_cuota, cuotas_pagadas_previas = :cuotas_pagadas_previas, periodo_desde = :periodo_desde, periodo_hasta = :periodo_hasta, pagos_previos_ids = :pagos_previos_ids, observaciones = :observaciones, activa = 1, fecha_actualizacion = :fecha_actualizacion WHERE id = :id");
-            return $stmt->execute($params);
+            $ok = $stmt->execute($params);
+            if (!$ok) throw new RuntimeException("No se pudo actualizar el acuerdo.");
+            $pdo->commit();
+            return $ok;
         }
 
         $editado = false;
+        $stmtHistorico = $pdo->prepare("UPDATE acuerdos SET activa = 0, fecha_actualizacion = NOW() WHERE empresa_id = :empresa_id AND tipo = :tipo AND activa = 1");
+        $stmtHistorico->execute(["empresa_id" => $datos["empresa_id"], "tipo" => $datos["tipo"]]);
+        $pasoAnteriorAHistorico = $stmtHistorico->rowCount() > 0;
+
         $params["fecha_carga_acuerdo"] = date("Y-m-d H:i:s");
         $params["usuario_carga_acuerdo"] = usuarioActual() ?: "SISTEMA";
         $params["fecha_creacion"] = date("Y-m-d H:i:s");
         $stmt = $pdo->prepare("INSERT INTO acuerdos (empresa_id, tipo, monto_total, cantidad_cuotas, monto_cuota, cuotas_pagadas_previas, periodo_desde, periodo_hasta, pagos_previos_ids, fecha_carga_acuerdo, usuario_carga_acuerdo, observaciones, activa, fecha_creacion, fecha_actualizacion) VALUES (:empresa_id, :tipo, :monto_total, :cantidad_cuotas, :monto_cuota, :cuotas_pagadas_previas, :periodo_desde, :periodo_hasta, :pagos_previos_ids, :fecha_carga_acuerdo, :usuario_carga_acuerdo, :observaciones, 1, :fecha_creacion, :fecha_actualizacion)");
-        return $stmt->execute($params);
+        $ok = $stmt->execute($params);
+        if (!$ok) throw new RuntimeException("No se pudo insertar el acuerdo.");
+        $pdo->commit();
+        return $ok;
     } catch (Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
         $error = "No se pudo guardar el acuerdo en MySQL: " . $e->getMessage();
         return false;
     }
@@ -643,6 +688,7 @@ function enviarBackupManual($empresasFile, $pagosFile, $auditoriaFile, $papelera
 
 function acuerdoDefault() {
     return [
+        "id" => "",
         "monto_total" => 0,
         "cantidad_cuotas" => 1,
         "monto_cuota" => 0,
@@ -652,7 +698,8 @@ function acuerdoDefault() {
         "periodo_hasta" => "",
         "fecha_carga_acuerdo" => "",
         "usuario_carga_acuerdo" => "",
-        "observaciones" => ""
+        "observaciones" => "",
+        "activa" => true
     ];
 }
 
@@ -1053,6 +1100,7 @@ if (isset($_POST["guardar_empresa"])) {
 }
 
 if (isset($_POST["guardar_acuerdo"])) {
+    $acuerdoId = trim($_POST["acuerdo_id"] ?? "");
     $empresaIdAcuerdo = $_POST["acuerdo_empresa_id"] ?? "";
     $tipoAcuerdo = $_POST["acuerdo_tipo"] ?? "";
     $montoTotalAcuerdo = floatval($_POST["acuerdo_monto_total"] ?? 0);
@@ -1107,8 +1155,10 @@ if (isset($_POST["guardar_acuerdo"])) {
 
     if ($errorEmpresa === "") {
         $acuerdoEditado = false;
+        $acuerdoAnteriorHistorico = false;
         $errorGuardarAcuerdo = null;
         $guardadoAcuerdo = guardarAcuerdoSql([
+            "id" => $acuerdoId,
             "empresa_id" => $empresaIdAcuerdo,
             "tipo" => $tipoAcuerdo,
             "monto_total" => $montoTotalAcuerdo,
@@ -1119,7 +1169,7 @@ if (isset($_POST["guardar_acuerdo"])) {
             "periodo_desde" => $periodoDesdeAcuerdo,
             "periodo_hasta" => $periodoHastaAcuerdo,
             "observaciones" => trim($_POST["acuerdo_observaciones"] ?? "")
-        ], $acuerdoEditado, $errorGuardarAcuerdo);
+        ], $acuerdoEditado, $errorGuardarAcuerdo, $acuerdoAnteriorHistorico);
 
         if (!$guardadoAcuerdo) {
             $errorEmpresa = $errorGuardarAcuerdo ?: "No se pudo guardar el acuerdo en MySQL.";
@@ -1127,10 +1177,18 @@ if (isset($_POST["guardar_acuerdo"])) {
     }
 
     if ($errorEmpresa === "" && !empty($guardadoAcuerdo)) {
+        $detalleAcuerdoAuditado = (($empresaAuditada["razon"] ?? "Empresa") . " - " . $tipoAcuerdo . " - " . $periodoDesdeAcuerdo . " a " . $periodoHastaAcuerdo . " - " . dinero($montoTotalAcuerdo) . " - pagos previos vinculados: " . count($pagosPreviosIdsAcuerdo));
+        if (!$acuerdoEditado && $acuerdoAnteriorHistorico) {
+            $detalleAcuerdoAuditado = "Creo nuevo acuerdo de " . (($empresaAuditada["razon"] ?? "Empresa") . " - " . $tipoAcuerdo) . ". El acuerdo anterior quedo como historico.";
+        } elseif ($acuerdoEditado) {
+            $detalleAcuerdoAuditado = "Edito acuerdo de " . $detalleAcuerdoAuditado;
+        } else {
+            $detalleAcuerdoAuditado = "Creo acuerdo de " . $detalleAcuerdoAuditado;
+        }
         registrarAuditoria(
             $auditoriaFile,
             $acuerdoEditado ? "editar_acuerdo" : "crear_acuerdo",
-            ($acuerdoEditado ? "Editó acuerdo de " : "Creó acuerdo de ") . (($empresaAuditada["razon"] ?? "Empresa") . " - " . $tipoAcuerdo . " - " . $periodoDesdeAcuerdo . " a " . $periodoHastaAcuerdo . " - " . dinero($montoTotalAcuerdo) . " - pagos previos vinculados: " . count($pagosPreviosIdsAcuerdo))
+            $detalleAcuerdoAuditado
         );
         header("Location: index.php#cargar-acuerdo");
         exit;
@@ -1373,7 +1431,7 @@ if (isset($_GET["eliminar_acuerdo"], $_GET["tipo_acuerdo"])) {
         $empresaEliminadaAcuerdo = buscarEmpresa($empresas, $empresaId);
         $errorEliminarAcuerdo = null;
         if (eliminarAcuerdoSql($empresaId, $tipoAcuerdoEliminar, $errorEliminarAcuerdo)) {
-            registrarAuditoria($auditoriaFile, "eliminar_acuerdo", "Eliminó acuerdo de " . (($empresaEliminadaAcuerdo["razon"] ?? "Empresa") . " - " . $tipoAcuerdoEliminar));
+            registrarAuditoria($auditoriaFile, "eliminar_acuerdo", "Paso a historico acuerdo de " . (($empresaEliminadaAcuerdo["razon"] ?? "Empresa") . " - " . $tipoAcuerdoEliminar));
         }
     }
 
@@ -1420,6 +1478,7 @@ if ($errorEmpresa !== "" && isset($_POST["guardar_empresa"])) {
 }
 
 $acuerdoForm = [
+    "id" => $_POST["acuerdo_id"] ?? "",
     "empresa_id" => $_POST["acuerdo_empresa_id"] ?? "",
     "tipo" => $_POST["acuerdo_tipo"] ?? "",
     "monto_total" => $_POST["acuerdo_monto_total"] ?? "",
@@ -2010,6 +2069,7 @@ Comprobante actual:
 <div class="card-body">
 
 <form method="post" id="acuerdoForm">
+<input type="hidden" name="acuerdo_id" id="acuerdoId" value="<?= e($acuerdoForm["id"] ?? "") ?>">
 <div class="grid">
 <?php $empresaAcuerdoSeleccionada = buscarEmpresa($empresas, $acuerdoForm["empresa_id"] ?? ""); ?>
 <div class="campo">
@@ -2074,6 +2134,7 @@ Comprobante actual:
 
 <div class="resumen-acuerdo" id="acuerdoResumen" aria-live="polite"></div>
 <div id="accionesAcuerdoExistente" style="display:none;margin-top:12px">
+<button type="button" id="nuevoAcuerdoMismoTipo" class="btn-secundario">Nuevo acuerdo para este tipo</button>
 <a id="eliminarAcuerdoSeleccionado" class="btn-danger" href="#" onclick="return confirm('¿Eliminar este acuerdo? No se eliminarán los pagos ya cargados.')" title="Eliminar acuerdo" aria-label="Eliminar acuerdo">🗑️</a>
 </div>
 
@@ -3318,6 +3379,7 @@ function proximaCuotaPendienteCliente(empresa, tipo) {
 
 function acuerdoEmpresaTipo(empresa, tipo) {
     const base = {
+        id: "",
         monto_total: 0,
         cantidad_cuotas: 1,
         monto_cuota: 0,
@@ -3327,7 +3389,8 @@ function acuerdoEmpresaTipo(empresa, tipo) {
         periodo_hasta: "",
         fecha_carga_acuerdo: "",
         usuario_carga_acuerdo: "",
-        observaciones: ""
+        observaciones: "",
+        activa: true
     };
     if (empresa?.acuerdos && empresa.acuerdos[tipo]) {
         return { ...base, ...empresa.acuerdos[tipo] };
@@ -3344,6 +3407,27 @@ function acuerdoEmpresaTipo(empresa, tipo) {
         periodo_desde: empresa?.periodo_desde || "",
         periodo_hasta: empresa?.periodo_hasta || "",
         observaciones: empresa?.observaciones_acuerdo || ""
+    };
+}
+
+function acuerdosHistorialEmpresaTipo(empresa, tipo) {
+    const lista = empresa?.acuerdos_historial?.[tipo];
+    return Array.isArray(lista) ? lista : [];
+}
+
+function acuerdosAnterioresEmpresaTipo(empresa, tipo) {
+    const vigenteId = String(acuerdoEmpresaTipo(empresa, tipo).id || "");
+    return acuerdosHistorialEmpresaTipo(empresa, tipo)
+        .filter((acuerdo) => acuerdo && acuerdo.activa === false && (!vigenteId || String(acuerdo.id || "") !== vigenteId));
+}
+
+function empresaConAcuerdoParaCalculo(empresa, tipo, acuerdo) {
+    return {
+        ...empresa,
+        acuerdos: {
+            ...(empresa?.acuerdos || {}),
+            [tipo]: { ...acuerdo, activa: true }
+        }
     };
 }
 
@@ -3802,7 +3886,7 @@ function resumenDetalleAcuerdo(empresa, tipo) {
     const responsable = acuerdo.usuario_carga_acuerdo || "";
 
     return `<div class="box">
-<div class="label">${escapeHtml(tipo)}</div>
+<div class="label">Acuerdo vigente - ${escapeHtml(tipo)}</div>
 <div>Monto total acuerdo: ${dineroCliente(resumen.montoTotal)}</div>
 <div>Cuotas totales: ${resumen.cantidad}</div>
 <div>Monto cuota: ${dineroCliente(resumen.montoCuota)}</div>
@@ -3819,6 +3903,33 @@ function resumenDetalleAcuerdo(empresa, tipo) {
 <div>Saldo pendiente del acuerdo: ${dineroCliente(resumen.saldo)}</div>
 <div style="margin-top:10px"><a class="btn-danger" href="?eliminar_acuerdo=${encodeURIComponent(empresa.id || "")}&tipo_acuerdo=${encodeURIComponent(tipo)}&origen=ficha" onclick="return confirm('¿Eliminar este acuerdo? No se eliminarán los pagos ya cargados.')" title="Eliminar acuerdo" aria-label="Eliminar acuerdo">🗑️</a></div>
 </div>`;
+}
+
+function resumenDetalleAcuerdosAnteriores(empresa, tipo) {
+    const anteriores = acuerdosAnterioresEmpresaTipo(empresa, tipo);
+    if (!anteriores.length) {
+        return "";
+    }
+
+    const items = anteriores.map((acuerdo) => {
+        const empresaHistorica = empresaConAcuerdoParaCalculo(empresa, tipo, acuerdo);
+        const resumen = resumenCalculoAcuerdoCliente(empresaHistorica, tipo);
+        const desde = periodoNormalizado(acuerdo.periodo_desde || "");
+        const hasta = periodoNormalizado(acuerdo.periodo_hasta || "");
+        const periodo = [desde, hasta].filter(Boolean).join(" a ");
+        const responsable = acuerdo.usuario_carga_acuerdo || "";
+        return `<div class="box">
+<div class="label">Acuerdo ${escapeHtml(periodo || "-")}</div>
+<div>Monto: ${dineroCliente(resumen.montoTotal)}</div>
+<div>Cuotas: ${resumen.cantidad}</div>
+<div>Responsable: ${responsable ? escapeHtml(responsable) : '<span class="sin">Sin responsable</span>'}</div>
+<div>Estado: <span class="estado estado-previa">anterior</span></div>
+<div>Saldo al cierre: ${dineroCliente(resumen.saldo)}</div>
+<div>Pagado: ${dineroCliente(resumen.pagado)}</div>
+</div>`;
+    }).join("");
+
+    return `<h3 class="mini-title">Acuerdos anteriores - ${escapeHtml(tipo)}</h3><div class="empresa-ficha-grid">${items}</div>`;
 }
 
 function fechaChequeMostrar(fecha) {
@@ -3889,6 +4000,7 @@ ${saldos.map((s) => `<div class="box"><div class="label">${escapeHtml(s.tipo)}</
 <h3 class="mini-title">Acuerdos vigentes</h3>
 <p>${tiposInforme.map((tipo) => escapeHtml(renderAcuerdoResumen(empresa, tipo))).join("<br>")}</p>
 <div class="empresa-ficha-grid">${tiposInforme.map((tipo) => resumenDetalleAcuerdo(empresa, tipo)).join("")}</div>
+${tiposInforme.map((tipo) => resumenDetalleAcuerdosAnteriores(empresa, tipo)).join("")}
 <h3 class="mini-title">Cheques pendientes</h3>
 ${chequesEmpresa.length ? `<table><thead><tr><th>Fecha de cobro</th><th>Estado</th><th>Acción</th></tr></thead><tbody>${chequesEmpresa.map((item) => {
     const clase = item.estado === "Cobrado" ? "estado-ok" : (item.estado === "Vencido" ? "estado-deudor" : (item.estado === "Vence hoy" ? "estado-parcial" : "estado-previa"));
@@ -4029,11 +4141,14 @@ function cargarAcuerdoExistente() {
     if (!form) return;
     const acciones = document.getElementById("accionesAcuerdoExistente");
     const eliminar = document.getElementById("eliminarAcuerdoSeleccionado");
+    const nuevo = document.getElementById("nuevoAcuerdoMismoTipo");
+    const acuerdoId = document.getElementById("acuerdoId");
     const empresaId = form.querySelector('input[name="acuerdo_empresa_id"]')?.value || "";
     const tipo = form.querySelector('select[name="acuerdo_tipo"]')?.value || "";
     const empresa = obtenerEmpresa(empresaId);
     if (!empresa || !tipo) {
         if (acciones) acciones.style.display = "none";
+        if (acuerdoId) acuerdoId.value = "";
         form.renderPagosPrevios?.([]);
         return;
     }
@@ -4041,6 +4156,7 @@ function cargarAcuerdoExistente() {
     const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
     if (!tieneDatosAcuerdo(empresa, tipo)) {
         if (acciones) acciones.style.display = "none";
+        if (acuerdoId) acuerdoId.value = "";
         form.querySelector('input[name="acuerdo_monto_total"]').value = "";
         form.querySelector('input[name="acuerdo_cantidad_cuotas"]').value = "";
         form.querySelector('input[name="acuerdo_monto_cuota"]').value = "";
@@ -4054,6 +4170,22 @@ function cargarAcuerdoExistente() {
     }
 
     if (acciones) acciones.style.display = "block";
+    if (acuerdoId) acuerdoId.value = acuerdo.id || "";
+    if (nuevo) {
+        nuevo.onclick = () => {
+            if (acuerdoId) acuerdoId.value = "";
+            form.querySelector('input[name="acuerdo_monto_total"]').value = "";
+            form.querySelector('input[name="acuerdo_cantidad_cuotas"]').value = "";
+            form.querySelector('input[name="acuerdo_monto_cuota"]').value = "";
+            form.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]').value = "0";
+            form.querySelector('input[name="acuerdo_periodo_desde"]').value = "";
+            form.querySelector('input[name="acuerdo_periodo_hasta"]').value = "";
+            form.querySelector('textarea[name="acuerdo_observaciones"]').value = "";
+            form.renderPagosPrevios?.([]);
+            if (typeof form.actualizarResumen === "function") form.actualizarResumen();
+            form.querySelector('input[name="acuerdo_monto_total"]')?.focus();
+        };
+    }
     if (eliminar) {
         eliminar.href = `?eliminar_acuerdo=${encodeURIComponent(empresaId)}&tipo_acuerdo=${encodeURIComponent(tipo)}`;
     }
