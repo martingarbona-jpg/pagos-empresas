@@ -1252,19 +1252,6 @@ if (isset($_POST["guardar_pago"])) {
             ];
         }
     }
-    $hayFechaChequeNoFutura = false;
-    foreach ($cheques as $posicion => $cheque) {
-        $indiceOriginal = isset($indicesCheque[$posicion]) && preg_match('/^\d+$/', (string)$indicesCheque[$posicion])
-            ? intval($indicesCheque[$posicion])
-            : -1;
-        $fechaOriginal = $indiceOriginal >= 0 ? trim($chequesExistentes[$indiceOriginal]["fecha_cobro"] ?? "") : "";
-        $fechaCheque = trim($cheque["fecha_cobro"] ?? "");
-        if ($fechaCheque <= date("Y-m-d") && $fechaCheque !== $fechaOriginal) {
-            $hayFechaChequeNoFutura = true;
-            break;
-        }
-    }
-
     if (!in_array($tipoDePago, ["Pago al día", "Cuota de acuerdo", "Pago único / extraordinario"], true)) {
         $errorPago = "Seleccioná un tipo de pago válido.";
     } elseif (!periodoValido($periodo)) {
@@ -1283,8 +1270,6 @@ if (isset($_POST["guardar_pago"])) {
         $errorPago = "Todas las fechas de cobro de los cheques deben estar completas.";
     } elseif ($formaPago === "Cheque" && count(array_filter($cheques, fn($cheque) => !fechaChequeValida($cheque["fecha_cobro"] ?? ""))) > 0) {
         $errorPago = "Todas las fechas de cobro de los cheques deben ser válidas.";
-    } elseif ($formaPago === "Cheque" && $hayFechaChequeNoFutura) {
-        $errorPago = "Las fechas de cobro de los cheques deben ser futuras.";
     } elseif (!empty($_FILES["comprobante"]["name"])) {
         $ext = strtolower(pathinfo($_FILES["comprobante"]["name"], PATHINFO_EXTENSION));
         $permitidos = ["pdf", "jpg", "jpeg", "png"];
@@ -3026,19 +3011,10 @@ if (pagoForm) {
         }
         if (formaPagoInput?.value === "Cheque") {
             const fechas = Array.from(chequesFechas?.querySelectorAll('input[name="cheque_fecha[]"]') || []);
-            const ahora = new Date();
-            const hoy = `${ahora.getFullYear()}-${String(ahora.getMonth() + 1).padStart(2, "0")}-${String(ahora.getDate()).padStart(2, "0")}`;
             if (!fechas.length || fechas.some((input) => !input.value)) {
                 event.preventDefault();
                 alert("Todas las fechas de cobro de los cheques deben estar completas.");
                 fechas.find((input) => !input.value)?.focus();
-                return;
-            }
-            const fechaNoFutura = fechas.find((input) => input.value <= hoy && input.value !== (input.dataset.original || ""));
-            if (fechaNoFutura) {
-                event.preventDefault();
-                alert("Las fechas de cobro de los cheques deben ser futuras.");
-                fechaNoFutura.focus();
                 return;
             }
         }
