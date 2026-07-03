@@ -255,12 +255,19 @@ function guardarAcuerdoSql($datos, &$editado = false, &$error = null, &$pasoAnte
     }
 }
 
-function eliminarAcuerdoSql($empresaId, $tipo, &$error = null) {
+function eliminarAcuerdoSql($empresaId, $tipo, $acuerdoId = "", &$error = null) {
     $pdo = conexionAcuerdos($error);
     if (!$pdo) return false;
 
     try {
-        $stmt = $pdo->prepare("UPDATE acuerdos SET activa = 0, fecha_actualizacion = NOW() WHERE empresa_id = ? AND tipo = ? AND activa = 1");
+        $acuerdoId = trim((string)$acuerdoId);
+        if ($acuerdoId !== "") {
+            $stmt = $pdo->prepare("DELETE FROM acuerdos WHERE id = ?");
+            $stmt->execute([$acuerdoId]);
+            return $stmt->rowCount() > 0;
+        }
+
+        $stmt = $pdo->prepare("DELETE FROM acuerdos WHERE empresa_id = ? AND tipo = ? AND activa = 1");
         $stmt->execute([$empresaId, $tipo]);
         return $stmt->rowCount() > 0;
     } catch (Throwable $e) {
@@ -1436,12 +1443,13 @@ if (isset($_GET["eliminar_pago"])) {
 if (isset($_GET["eliminar_acuerdo"], $_GET["tipo_acuerdo"])) {
     $empresaId = $_GET["eliminar_acuerdo"];
     $tipoAcuerdoEliminar = $_GET["tipo_acuerdo"];
+    $acuerdoIdEliminar = trim($_GET["acuerdo_id"] ?? "");
 
     if (in_array($tipoAcuerdoEliminar, ["Obra Social", "Sindicato", "Mutual"], true)) {
         $empresaEliminadaAcuerdo = buscarEmpresa($empresas, $empresaId);
         $errorEliminarAcuerdo = null;
-        if (eliminarAcuerdoSql($empresaId, $tipoAcuerdoEliminar, $errorEliminarAcuerdo)) {
-            registrarAuditoria($auditoriaFile, "eliminar_acuerdo", "Paso a historico acuerdo de " . (($empresaEliminadaAcuerdo["razon"] ?? "Empresa") . " - " . $tipoAcuerdoEliminar));
+        if (eliminarAcuerdoSql($empresaId, $tipoAcuerdoEliminar, $acuerdoIdEliminar, $errorEliminarAcuerdo)) {
+            registrarAuditoria($auditoriaFile, "eliminar_acuerdo", "EliminÃ³ acuerdo de " . (($empresaEliminadaAcuerdo["razon"] ?? "Empresa") . " - " . $tipoAcuerdoEliminar));
         }
     }
 
@@ -3929,7 +3937,7 @@ function resumenDetalleAcuerdo(empresa, tipo) {
 <div>Estado: <span class="estado ${estadoClase}">${escapeHtml(proxima?.estado || "Al dia")}</span></div>
 <div>Saldo pendiente del acuerdo: ${dineroCliente(resumen.saldo)}</div>
 <div style="margin-top:10px"><button type="button" class="btn-small ficha-editar-acuerdo" data-empresa="${escapeHtml(empresa.id || "")}" data-tipo="${escapeHtml(tipo)}">Editar acuerdo</button></div>
-<div style="margin-top:10px"><a class="btn-danger" href="?eliminar_acuerdo=${encodeURIComponent(empresa.id || "")}&tipo_acuerdo=${encodeURIComponent(tipo)}&origen=ficha" onclick="return confirm('¿Eliminar este acuerdo? No se eliminarán los pagos ya cargados.')" title="Eliminar acuerdo" aria-label="Eliminar acuerdo">🗑️</a></div>
+<div style="margin-top:10px"><a class="btn-danger" href="?eliminar_acuerdo=${encodeURIComponent(empresa.id || "")}&tipo_acuerdo=${encodeURIComponent(tipo)}&acuerdo_id=${encodeURIComponent(acuerdo.id || "")}&origen=ficha" onclick="return confirm('¿Eliminar este acuerdo? No se eliminarán los pagos ya cargados.')" title="Eliminar acuerdo" aria-label="Eliminar acuerdo">🗑️</a></div>
 ${historial}
 </div>`;
 }
@@ -4210,7 +4218,7 @@ function cargarAcuerdoExistente() {
         };
     }
     if (eliminar) {
-        eliminar.href = `?eliminar_acuerdo=${encodeURIComponent(empresaId)}&tipo_acuerdo=${encodeURIComponent(tipo)}`;
+        eliminar.href = `?eliminar_acuerdo=${encodeURIComponent(empresaId)}&tipo_acuerdo=${encodeURIComponent(tipo)}&acuerdo_id=${encodeURIComponent(acuerdo.id || "")}`;
     }
     if (editar) {
         editar.onclick = () => cargarAcuerdoParaEditar(empresa, tipo);
