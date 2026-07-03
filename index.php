@@ -113,7 +113,7 @@ function acuerdosSql(&$error = null) {
     if (!$pdo) return null;
 
     try {
-        $stmt = $pdo->query("SELECT id, empresa_id, tipo, monto_total, cantidad_cuotas, monto_cuota, cuotas_pagadas_previas, periodo_desde, periodo_hasta, pagos_previos_ids, fecha_carga_acuerdo, usuario_carga_acuerdo, observaciones, activa, fecha_creacion, fecha_actualizacion FROM acuerdos WHERE activa = 1 ORDER BY fecha_actualizacion DESC, fecha_creacion DESC, id DESC");
+        $stmt = $pdo->query("SELECT id, empresa_id, tipo, monto_total, cantidad_cuotas, monto_cuota, cuotas_pagadas_previas, periodo_desde, periodo_hasta, pagos_previos_ids, fecha_carga_acuerdo, usuario_carga_acuerdo, observaciones, activa, fecha_creacion, fecha_actualizacion FROM acuerdos ORDER BY activa DESC, fecha_actualizacion DESC, fecha_creacion DESC, id DESC");
         return array_map("normalizarAcuerdoSql", $stmt->fetchAll());
     } catch (Throwable $e) {
         $error = "No se pudieron leer los acuerdos desde MySQL: " . $e->getMessage();
@@ -126,11 +126,20 @@ function aplicarAcuerdosSqlAEmpresas($empresas, &$error = null) {
     if ($acuerdos === null) return $empresas;
 
     $porEmpresaTipo = [];
+    $anterioresPorEmpresaTipo = [];
     foreach ($acuerdos as $acuerdo) {
         $empresaId = $acuerdo["empresa_id"] ?? "";
         $tipo = $acuerdo["tipo"] ?? "";
-        if ($empresaId === "" || $tipo === "" || isset($porEmpresaTipo[$empresaId][$tipo])) continue;
-        $porEmpresaTipo[$empresaId][$tipo] = $acuerdo;
+        if ($empresaId === "" || $tipo === "") continue;
+
+        if (!empty($acuerdo["activa"])) {
+            if (!isset($porEmpresaTipo[$empresaId][$tipo])) {
+                $porEmpresaTipo[$empresaId][$tipo] = $acuerdo;
+            }
+            continue;
+        }
+
+        $anterioresPorEmpresaTipo[$empresaId][$tipo][] = $acuerdo;
     }
 
     foreach ($empresas as $indice => $empresa) {
@@ -138,6 +147,9 @@ function aplicarAcuerdosSqlAEmpresas($empresas, &$error = null) {
         $empresas[$indice]["_acuerdos_sql_leidos"] = true;
         $empresas[$indice]["acuerdos"] = $empresaId !== "" && isset($porEmpresaTipo[$empresaId])
             ? $porEmpresaTipo[$empresaId]
+            : [];
+        $empresas[$indice]["acuerdos_anteriores"] = $empresaId !== "" && isset($anterioresPorEmpresaTipo[$empresaId])
+            ? $anterioresPorEmpresaTipo[$empresaId]
             : [];
     }
 
@@ -163,8 +175,7 @@ function guardarAcuerdoSql($datos, &$editado = false, &$error = null) {
     $pdo = conexionAcuerdos($error);
     if (!$pdo) return false;
 
-    $existente = acuerdoActivoSql($datos["empresa_id"], $datos["tipo"], $error);
-    if ($error !== null && $existente === null) return false;
+    $acuerdoId = trim((string)($datos["id"] ?? ""));
 
     $params = [
         "empresa_id" => $datos["empresa_id"],
@@ -181,20 +192,30 @@ function guardarAcuerdoSql($datos, &$editado = false, &$error = null) {
     ];
 
     try {
-        if ($existente) {
+        if ($acuerdoId !== "") {
             $editado = true;
-            $params["id"] = $existente["id"];
-            $stmt = $pdo->prepare("UPDATE acuerdos SET empresa_id = :empresa_id, tipo = :tipo, monto_total = :monto_total, cantidad_cuotas = :cantidad_cuotas, monto_cuota = :monto_cuota, cuotas_pagadas_previas = :cuotas_pagadas_previas, periodo_desde = :periodo_desde, periodo_hasta = :periodo_hasta, pagos_previos_ids = :pagos_previos_ids, observaciones = :observaciones, activa = 1, fecha_actualizacion = :fecha_actualizacion WHERE id = :id");
+            $params["id"] = $acuerdoId;
+            $stmt = $pdo->prepare("UPDATE acuerdos SET empresa_id = :empresa_id, tipo = :tipo, monto_total = :monto_total, cantidad_cuotas = :cantidad_cuotas, monto_cuota = :monto_cuota, cuotas_pagadas_previas = :cuotas_pagadas_previas, periodo_desde = :periodo_desde, periodo_hasta = :periodo_hasta, pagos_previos_ids = :pagos_previos_ids, observaciones = :observaciones, fecha_actualizacion = :fecha_actualizacion WHERE id = :id");
             return $stmt->execute($params);
         }
 
         $editado = false;
+        $pdo->beginTransaction();
+        $stmt = $pdo->prepare("UPDATE acuerdos SET activa = 0, fecha_actualizacion = NOW() WHERE empresa_id = ? AND tipo = ? AND activa = 1");
+        $stmt->execute([$datos["empresa_id"], $datos["tipo"]]);
+
         $params["fecha_carga_acuerdo"] = date("Y-m-d H:i:s");
         $params["usuario_carga_acuerdo"] = usuarioActual() ?: "SISTEMA";
         $params["fecha_creacion"] = date("Y-m-d H:i:s");
         $stmt = $pdo->prepare("INSERT INTO acuerdos (empresa_id, tipo, monto_total, cantidad_cuotas, monto_cuota, cuotas_pagadas_previas, periodo_desde, periodo_hasta, pagos_previos_ids, fecha_carga_acuerdo, usuario_carga_acuerdo, observaciones, activa, fecha_creacion, fecha_actualizacion) VALUES (:empresa_id, :tipo, :monto_total, :cantidad_cuotas, :monto_cuota, :cuotas_pagadas_previas, :periodo_desde, :periodo_hasta, :pagos_previos_ids, :fecha_carga_acuerdo, :usuario_carga_acuerdo, :observaciones, 1, :fecha_creacion, :fecha_actualizacion)");
-        return $stmt->execute($params);
+        $guardado = $stmt->execute($params);
+        if (!$guardado) {
+            throw new RuntimeException("El INSERT no se pudo ejecutar.");
+        }
+        $pdo->commit();
+        return $guardado;
     } catch (Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
         $error = "No se pudo guardar el acuerdo en MySQL: " . $e->getMessage();
         return false;
     }
@@ -1053,6 +1074,7 @@ if (isset($_POST["guardar_empresa"])) {
 }
 
 if (isset($_POST["guardar_acuerdo"])) {
+    $acuerdoIdActual = trim($_POST["acuerdo_id"] ?? "");
     $empresaIdAcuerdo = $_POST["acuerdo_empresa_id"] ?? "";
     $tipoAcuerdo = $_POST["acuerdo_tipo"] ?? "";
     $montoTotalAcuerdo = floatval($_POST["acuerdo_monto_total"] ?? 0);
@@ -1109,6 +1131,7 @@ if (isset($_POST["guardar_acuerdo"])) {
         $acuerdoEditado = false;
         $errorGuardarAcuerdo = null;
         $guardadoAcuerdo = guardarAcuerdoSql([
+            "id" => $acuerdoIdActual,
             "empresa_id" => $empresaIdAcuerdo,
             "tipo" => $tipoAcuerdo,
             "monto_total" => $montoTotalAcuerdo,
@@ -1420,6 +1443,7 @@ if ($errorEmpresa !== "" && isset($_POST["guardar_empresa"])) {
 }
 
 $acuerdoForm = [
+    "id" => $_POST["acuerdo_id"] ?? "",
     "empresa_id" => $_POST["acuerdo_empresa_id"] ?? "",
     "tipo" => $_POST["acuerdo_tipo"] ?? "",
     "monto_total" => $_POST["acuerdo_monto_total"] ?? "",
@@ -2010,6 +2034,7 @@ Comprobante actual:
 <div class="card-body">
 
 <form method="post" id="acuerdoForm">
+<input type="hidden" name="acuerdo_id" id="acuerdoId" value="<?= e($acuerdoForm["id"] ?? "") ?>">
 <div class="grid">
 <?php $empresaAcuerdoSeleccionada = buscarEmpresa($empresas, $acuerdoForm["empresa_id"] ?? ""); ?>
 <div class="campo">
@@ -2074,6 +2099,7 @@ Comprobante actual:
 
 <div class="resumen-acuerdo" id="acuerdoResumen" aria-live="polite"></div>
 <div id="accionesAcuerdoExistente" style="display:none;margin-top:12px">
+<button type="button" class="btn-secundario" id="editarAcuerdoSeleccionado">Editar acuerdo vigente</button>
 <a id="eliminarAcuerdoSeleccionado" class="btn-danger" href="#" onclick="return confirm('¿Eliminar este acuerdo? No se eliminarán los pagos ya cargados.')" title="Eliminar acuerdo" aria-label="Eliminar acuerdo">🗑️</a>
 </div>
 
@@ -3789,10 +3815,30 @@ function renderAcuerdoResumen(empresa, tipo) {
     return `${tipo}: Acuerdo ${detalle}${previas ? " - previas pagadas: " + previas : ""}${periodo ? " (" + periodo + ")" : ""}`;
 }
 
+function acuerdosAnterioresEmpresaTipo(empresa, tipo) {
+    const acuerdos = empresa?.acuerdos_anteriores?.[tipo];
+    return Array.isArray(acuerdos) ? acuerdos : [];
+}
+
+function renderAcuerdoHistorico(acuerdo) {
+    const cuotas = Math.max(Number(acuerdo.cantidad_cuotas || 0), 0);
+    const periodoDesde = periodoNormalizado(acuerdo.periodo_desde || "");
+    const periodoHasta = periodoNormalizado(acuerdo.periodo_hasta || "");
+    const periodo = periodoDesde && periodoHasta ? `${periodoDesde} a ${periodoHasta}` : (periodoDesde || periodoHasta || "-");
+    const anio = periodoDesde.length === 5 ? `20${periodoDesde.slice(3)}` : periodoDesde;
+    const titulo = periodoDesde ? `Acuerdo ${escapeHtml(anio)}` : `Acuerdo #${escapeHtml(String(acuerdo.id || ""))}`;
+    return `<div class="historial-acuerdo-item">
+<strong>${titulo}</strong>
+<div>${escapeHtml(periodo)} - ${cuotas} cuotas - ${dineroCliente(acuerdo.monto_total)}</div>
+</div>`;
+}
+
 function resumenDetalleAcuerdo(empresa, tipo) {
     const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
+    const anteriores = acuerdosAnterioresEmpresaTipo(empresa, tipo);
     if (!tieneDatosAcuerdo(empresa, tipo) || (Number(acuerdo.monto_total || 0) <= 0 && Number(acuerdo.monto_cuota || 0) <= 0)) {
-        return `<div class="box"><div class="label">${escapeHtml(tipo)}</div><div class="sin">Sin acuerdo cargado</div></div>`;
+        const historial = anteriores.length ? `<hr><h3 class="mini-title">Acuerdos anteriores</h3>${anteriores.map(renderAcuerdoHistorico).join("")}` : "";
+        return `<div class="box"><div class="label">${escapeHtml(tipo)}</div><div class="sin">Sin acuerdo vigente</div>${historial}</div>`;
     }
 
     const resumen = resumenCalculoAcuerdoCliente(empresa, tipo);
@@ -3800,9 +3846,11 @@ function resumenDetalleAcuerdo(empresa, tipo) {
     const estadoClase = proxima?.estado === "Vencida" ? "estado-deudor" : (proxima?.estado === "Vence hoy" ? "estado-parcial" : "estado-ok");
     const fechaBase = fechaBaseAcuerdoCliente(acuerdo)?.iso || "";
     const responsable = acuerdo.usuario_carga_acuerdo || "";
+    const historial = anteriores.length ? `<hr><h3 class="mini-title">Acuerdos anteriores</h3>${anteriores.map(renderAcuerdoHistorico).join("")}` : "";
 
     return `<div class="box">
 <div class="label">${escapeHtml(tipo)}</div>
+<h3 class="mini-title">Acuerdo vigente</h3>
 <div>Monto total acuerdo: ${dineroCliente(resumen.montoTotal)}</div>
 <div>Cuotas totales: ${resumen.cantidad}</div>
 <div>Monto cuota: ${dineroCliente(resumen.montoCuota)}</div>
@@ -3817,7 +3865,9 @@ function resumenDetalleAcuerdo(empresa, tipo) {
 <div>Fecha de vencimiento proxima cuota: ${proxima?.vencimiento ? escapeHtml(fechaMostrarCliente(proxima.vencimiento)) : '-'}</div>
 <div>Estado: <span class="estado ${estadoClase}">${escapeHtml(proxima?.estado || "Al dia")}</span></div>
 <div>Saldo pendiente del acuerdo: ${dineroCliente(resumen.saldo)}</div>
+<div style="margin-top:10px"><button type="button" class="btn-small ficha-editar-acuerdo" data-empresa="${escapeHtml(empresa.id || "")}" data-tipo="${escapeHtml(tipo)}">Editar acuerdo</button></div>
 <div style="margin-top:10px"><a class="btn-danger" href="?eliminar_acuerdo=${encodeURIComponent(empresa.id || "")}&tipo_acuerdo=${encodeURIComponent(tipo)}&origen=ficha" onclick="return confirm('¿Eliminar este acuerdo? No se eliminarán los pagos ya cargados.')" title="Eliminar acuerdo" aria-label="Eliminar acuerdo">🗑️</a></div>
+${historial}
 </div>`;
 }
 
@@ -3908,6 +3958,16 @@ ${empresaActivaCliente(empresa) ? `<a class="btn-danger" href="?eliminar_empresa
 
     ficha.querySelector(".ficha-cargar-pago")?.addEventListener("click", () => completarFormularioPago(empresa.id || "", "", ""));
     ficha.querySelector(".ficha-cargar-acuerdo")?.addEventListener("click", () => completarFormularioAcuerdo(empresa.id || "", ""));
+    ficha.querySelectorAll(".ficha-editar-acuerdo").forEach((boton) => {
+        boton.addEventListener("click", () => {
+            const empresaEditar = obtenerEmpresa(boton.dataset.empresa || "");
+            if (!empresaEditar) return;
+            activarTab("cargar-acuerdo");
+            abrirCard(document.getElementById("cargar-acuerdo"));
+            cargarAcuerdoParaEditar(empresaEditar, boton.dataset.tipo || "");
+            window.scrollTo({ top: 0, behavior: "smooth" });
+        });
+    });
 }
 
 function renderResultadosEmpresa(input, contenedor, limite = 12) {
@@ -4002,8 +4062,9 @@ function completarFormularioAcuerdo(empresaId, tipo) {
     const form = document.getElementById("acuerdoForm");
     if (form) {
         const tipoInput = form.querySelector('select[name="acuerdo_tipo"]');
+        limpiarFormularioAcuerdo(false);
         seleccionarEmpresaPicker("acuerdo_empresa_id", empresaId);
-        if (tipoInput && tipo) tipoInput.value = tipo;
+        if (tipoInput) tipoInput.value = tipo || "";
         cargarAcuerdoExistente();
     }
 
@@ -4029,34 +4090,59 @@ function cargarAcuerdoExistente() {
     if (!form) return;
     const acciones = document.getElementById("accionesAcuerdoExistente");
     const eliminar = document.getElementById("eliminarAcuerdoSeleccionado");
+    const editar = document.getElementById("editarAcuerdoSeleccionado");
     const empresaId = form.querySelector('input[name="acuerdo_empresa_id"]')?.value || "";
     const tipo = form.querySelector('select[name="acuerdo_tipo"]')?.value || "";
     const empresa = obtenerEmpresa(empresaId);
+    form.querySelector('input[name="acuerdo_id"]').value = "";
     if (!empresa || !tipo) {
         if (acciones) acciones.style.display = "none";
-        form.renderPagosPrevios?.([]);
+        limpiarFormularioAcuerdo(false);
         return;
     }
 
     const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
     if (!tieneDatosAcuerdo(empresa, tipo)) {
         if (acciones) acciones.style.display = "none";
-        form.querySelector('input[name="acuerdo_monto_total"]').value = "";
-        form.querySelector('input[name="acuerdo_cantidad_cuotas"]').value = "";
-        form.querySelector('input[name="acuerdo_monto_cuota"]').value = "";
-        form.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]').value = "0";
-        form.querySelector('input[name="acuerdo_periodo_desde"]').value = "";
-        form.querySelector('input[name="acuerdo_periodo_hasta"]').value = "";
-        form.querySelector('textarea[name="acuerdo_observaciones"]').value = "";
-        form.renderPagosPrevios?.([]);
-        if (typeof form.actualizarResumen === "function") form.actualizarResumen();
+        limpiarFormularioAcuerdo(false);
         return;
     }
 
+    limpiarFormularioAcuerdo(false);
     if (acciones) acciones.style.display = "block";
     if (eliminar) {
         eliminar.href = `?eliminar_acuerdo=${encodeURIComponent(empresaId)}&tipo_acuerdo=${encodeURIComponent(tipo)}`;
     }
+    if (editar) {
+        editar.onclick = () => cargarAcuerdoParaEditar(empresa, tipo);
+    }
+    form.renderPagosPrevios?.([]);
+    if (typeof form.actualizarResumen === "function") form.actualizarResumen();
+}
+
+function limpiarFormularioAcuerdo(limpiarTipo = true) {
+    const form = document.getElementById("acuerdoForm");
+    if (!form) return;
+    form.querySelector('input[name="acuerdo_id"]').value = "";
+    if (limpiarTipo) form.querySelector('select[name="acuerdo_tipo"]').value = "";
+    form.querySelector('input[name="acuerdo_monto_total"]').value = "";
+    form.querySelector('input[name="acuerdo_cantidad_cuotas"]').value = "";
+    form.querySelector('input[name="acuerdo_monto_cuota"]').value = "";
+    form.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]').value = "0";
+    form.querySelector('input[name="acuerdo_periodo_desde"]').value = "";
+    form.querySelector('input[name="acuerdo_periodo_hasta"]').value = "";
+    form.querySelector('textarea[name="acuerdo_observaciones"]').value = "";
+    form.renderPagosPrevios?.([]);
+    if (typeof form.actualizarResumen === "function") form.actualizarResumen();
+}
+
+function cargarAcuerdoParaEditar(empresa, tipo) {
+    const form = document.getElementById("acuerdoForm");
+    if (!form) return;
+    const acuerdo = acuerdoEmpresaTipo(empresa, tipo);
+    seleccionarEmpresaPicker("acuerdo_empresa_id", empresa.id || "");
+    form.querySelector('input[name="acuerdo_id"]').value = acuerdo.id || "";
+    form.querySelector('select[name="acuerdo_tipo"]').value = tipo || "";
     form.querySelector('input[name="acuerdo_monto_total"]').value = acuerdo.monto_total || "";
     form.querySelector('input[name="acuerdo_cantidad_cuotas"]').value = acuerdo.cantidad_cuotas || "2";
     form.querySelector('input[name="acuerdo_monto_cuota"]').value = acuerdo.monto_cuota || "";
