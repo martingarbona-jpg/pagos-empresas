@@ -102,6 +102,7 @@ function normalizarAcuerdoSql($fila) {
         "periodo_desde" => periodoParaInput($fila["periodo_desde"] ?? ""),
         "periodo_hasta" => periodoParaInput($fila["periodo_hasta"] ?? ""),
         "fecha_carga_acuerdo" => $fila["fecha_carga_acuerdo"] ?? "",
+        "fecha_primer_pago" => $fila["fecha_primer_pago"] ?? "",
         "usuario_carga_acuerdo" => $fila["usuario_carga_acuerdo"] ?? "",
         "observaciones" => $fila["observaciones"] ?? "",
         "activa" => intval($fila["activa"] ?? 1) === 1
@@ -114,7 +115,7 @@ function acuerdosSql(&$error = null, $soloActivos = true) {
 
     try {
         $where = $soloActivos ? "WHERE activa = 1" : "";
-        $stmt = $pdo->query("SELECT id, empresa_id, tipo, monto_total, cantidad_cuotas, monto_cuota, cuotas_pagadas_previas, periodo_desde, periodo_hasta, pagos_previos_ids, fecha_carga_acuerdo, usuario_carga_acuerdo, observaciones, activa, fecha_creacion, fecha_actualizacion FROM acuerdos $where ORDER BY activa DESC, fecha_actualizacion DESC, fecha_creacion DESC, id DESC");
+        $stmt = $pdo->query("SELECT id, empresa_id, tipo, monto_total, cantidad_cuotas, monto_cuota, cuotas_pagadas_previas, periodo_desde, periodo_hasta, pagos_previos_ids, fecha_carga_acuerdo, fecha_primer_pago, usuario_carga_acuerdo, observaciones, activa, fecha_creacion, fecha_actualizacion FROM acuerdos $where ORDER BY activa DESC, fecha_actualizacion DESC, fecha_creacion DESC, id DESC");
         return array_map("normalizarAcuerdoSql", $stmt->fetchAll());
     } catch (Throwable $e) {
         $error = "No se pudieron leer los acuerdos desde MySQL: " . $e->getMessage();
@@ -177,7 +178,7 @@ function acuerdoActivoSql($empresaId, $tipo, &$error = null) {
     if (!$pdo) return null;
 
     try {
-        $stmt = $pdo->prepare("SELECT id, empresa_id, tipo, monto_total, cantidad_cuotas, monto_cuota, cuotas_pagadas_previas, periodo_desde, periodo_hasta, pagos_previos_ids, fecha_carga_acuerdo, usuario_carga_acuerdo, observaciones, activa, fecha_creacion, fecha_actualizacion FROM acuerdos WHERE empresa_id = :empresa_id AND tipo = :tipo AND activa = 1 ORDER BY fecha_actualizacion DESC, fecha_creacion DESC, id DESC LIMIT 1");
+        $stmt = $pdo->prepare("SELECT id, empresa_id, tipo, monto_total, cantidad_cuotas, monto_cuota, cuotas_pagadas_previas, periodo_desde, periodo_hasta, pagos_previos_ids, fecha_carga_acuerdo, fecha_primer_pago, usuario_carga_acuerdo, observaciones, activa, fecha_creacion, fecha_actualizacion FROM acuerdos WHERE empresa_id = :empresa_id AND tipo = :tipo AND activa = 1 ORDER BY fecha_actualizacion DESC, fecha_creacion DESC, id DESC LIMIT 1");
         $stmt->execute(["empresa_id" => $empresaId, "tipo" => $tipo]);
         $fila = $stmt->fetch();
         return $fila ? normalizarAcuerdoSql($fila) : null;
@@ -195,7 +196,7 @@ function guardarAcuerdoSql($datos, &$editado = false, &$error = null, &$pasoAnte
     $existente = null;
     if ($acuerdoId !== "") {
         try {
-            $stmt = $pdo->prepare("SELECT id, empresa_id, tipo, monto_total, cantidad_cuotas, monto_cuota, cuotas_pagadas_previas, periodo_desde, periodo_hasta, pagos_previos_ids, fecha_carga_acuerdo, usuario_carga_acuerdo, observaciones, activa, fecha_creacion, fecha_actualizacion FROM acuerdos WHERE id = :id LIMIT 1");
+            $stmt = $pdo->prepare("SELECT id, empresa_id, tipo, monto_total, cantidad_cuotas, monto_cuota, cuotas_pagadas_previas, periodo_desde, periodo_hasta, pagos_previos_ids, fecha_carga_acuerdo, fecha_primer_pago, usuario_carga_acuerdo, observaciones, activa, fecha_creacion, fecha_actualizacion FROM acuerdos WHERE id = :id LIMIT 1");
             $stmt->execute(["id" => $acuerdoId]);
             $fila = $stmt->fetch();
             $existente = $fila ? normalizarAcuerdoSql($fila) : null;
@@ -219,6 +220,7 @@ function guardarAcuerdoSql($datos, &$editado = false, &$error = null, &$pasoAnte
         "periodo_desde" => $datos["periodo_desde"],
         "periodo_hasta" => $datos["periodo_hasta"],
         "pagos_previos_ids" => json_encode(array_values($datos["pagos_previos_ids"]), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        "fecha_primer_pago" => $datos["fecha_primer_pago"],
         "observaciones" => $datos["observaciones"],
         "fecha_actualizacion" => date("Y-m-d H:i:s")
     ];
@@ -228,7 +230,7 @@ function guardarAcuerdoSql($datos, &$editado = false, &$error = null, &$pasoAnte
         if ($existente) {
             $editado = true;
             $params["id"] = $existente["id"];
-            $stmt = $pdo->prepare("UPDATE acuerdos SET empresa_id = :empresa_id, tipo = :tipo, monto_total = :monto_total, cantidad_cuotas = :cantidad_cuotas, monto_cuota = :monto_cuota, cuotas_pagadas_previas = :cuotas_pagadas_previas, periodo_desde = :periodo_desde, periodo_hasta = :periodo_hasta, pagos_previos_ids = :pagos_previos_ids, observaciones = :observaciones, fecha_actualizacion = :fecha_actualizacion WHERE id = :id");
+            $stmt = $pdo->prepare("UPDATE acuerdos SET empresa_id = :empresa_id, tipo = :tipo, monto_total = :monto_total, cantidad_cuotas = :cantidad_cuotas, monto_cuota = :monto_cuota, cuotas_pagadas_previas = :cuotas_pagadas_previas, periodo_desde = :periodo_desde, periodo_hasta = :periodo_hasta, pagos_previos_ids = :pagos_previos_ids, fecha_primer_pago = :fecha_primer_pago, observaciones = :observaciones, fecha_actualizacion = :fecha_actualizacion WHERE id = :id");
             $ok = $stmt->execute($params);
             if (!$ok) throw new RuntimeException("No se pudo actualizar el acuerdo.");
             $pdo->commit();
@@ -243,7 +245,7 @@ function guardarAcuerdoSql($datos, &$editado = false, &$error = null, &$pasoAnte
         $params["fecha_carga_acuerdo"] = date("Y-m-d H:i:s");
         $params["usuario_carga_acuerdo"] = usuarioActual() ?: "SISTEMA";
         $params["fecha_creacion"] = date("Y-m-d H:i:s");
-        $stmt = $pdo->prepare("INSERT INTO acuerdos (empresa_id, tipo, monto_total, cantidad_cuotas, monto_cuota, cuotas_pagadas_previas, periodo_desde, periodo_hasta, pagos_previos_ids, fecha_carga_acuerdo, usuario_carga_acuerdo, observaciones, activa, fecha_creacion, fecha_actualizacion) VALUES (:empresa_id, :tipo, :monto_total, :cantidad_cuotas, :monto_cuota, :cuotas_pagadas_previas, :periodo_desde, :periodo_hasta, :pagos_previos_ids, :fecha_carga_acuerdo, :usuario_carga_acuerdo, :observaciones, 1, :fecha_creacion, :fecha_actualizacion)");
+        $stmt = $pdo->prepare("INSERT INTO acuerdos (empresa_id, tipo, monto_total, cantidad_cuotas, monto_cuota, cuotas_pagadas_previas, periodo_desde, periodo_hasta, pagos_previos_ids, fecha_carga_acuerdo, fecha_primer_pago, usuario_carga_acuerdo, observaciones, activa, fecha_creacion, fecha_actualizacion) VALUES (:empresa_id, :tipo, :monto_total, :cantidad_cuotas, :monto_cuota, :cuotas_pagadas_previas, :periodo_desde, :periodo_hasta, :pagos_previos_ids, :fecha_carga_acuerdo, :fecha_primer_pago, :usuario_carga_acuerdo, :observaciones, 1, :fecha_creacion, :fecha_actualizacion)");
         $ok = $stmt->execute($params);
         if (!$ok) throw new RuntimeException("No se pudo insertar el acuerdo.");
         $pdo->commit();
@@ -381,7 +383,8 @@ function periodoDesdeIndice($indice) {
 }
 
 function fechaBaseAcuerdo($acuerdo) {
-    $fecha = trim($acuerdo["fecha_carga_acuerdo"] ?? "");
+    $fecha = trim($acuerdo["fecha_primer_pago"] ?? "");
+    if ($fecha === "") $fecha = trim($acuerdo["fecha_carga_acuerdo"] ?? "");
     if ($fecha === "") return null;
     try {
         return new DateTimeImmutable(substr($fecha, 0, 10));
@@ -714,6 +717,7 @@ function acuerdoDefault() {
         "periodo_desde" => "",
         "periodo_hasta" => "",
         "fecha_carga_acuerdo" => "",
+        "fecha_primer_pago" => "",
         "usuario_carga_acuerdo" => "",
         "observaciones" => "",
         "activa" => true
@@ -816,8 +820,6 @@ function alertasCuotasAcuerdo($empresas, $pagos, $usuario) {
             for ($numero = 1; $numero <= $cantidad; $numero++) {
                 $fechaVencimiento = fechaVencimientoCuotaAcuerdo($acuerdo, $numero);
                 if ($fechaVencimiento === "" || $fechaVencimiento > $hoy) continue;
-                if ($numero === 1 && $fechaVencimiento === $hoy && $fechaVencimiento === substr(trim($acuerdo["fecha_carga_acuerdo"] ?? ""), 0, 10)) continue;
-
                 $periodo = periodoCuotaAcuerdo($acuerdo, $numero);
                 if ($periodo === "") continue;
                 if (cuotaAcuerdoPagada($acuerdo, $empresaId, $tipo, $numero, $periodo, $pagos, $empresas)) continue;
@@ -1130,6 +1132,7 @@ if (isset($_POST["guardar_acuerdo"])) {
         : [];
     $periodoDesdeAcuerdo = trim($_POST["acuerdo_periodo_desde"] ?? "");
     $periodoHastaAcuerdo = trim($_POST["acuerdo_periodo_hasta"] ?? "");
+    $fechaPrimerPagoAcuerdo = trim($_POST["acuerdo_fecha_primer_pago"] ?? "");
     $empresaAuditada = buscarEmpresa($empresas, $empresaIdAcuerdo);
     $pagosPreviosValidos = pagosPreviosVinculados(
         ["pagos_previos_ids" => $pagosPreviosIdsAcuerdo],
@@ -1158,6 +1161,12 @@ if (isset($_POST["guardar_acuerdo"])) {
         $errorEmpresa = "Los pagos previos vinculados no pueden superar las cuotas previas declaradas.";
     } elseif (count($pagosPreviosValidos) !== count($pagosPreviosIdsAcuerdo)) {
         $errorEmpresa = "Solo se pueden vincular pagos existentes de la misma empresa y tipo.";
+    } elseif ($fechaPrimerPagoAcuerdo === "") {
+        $errorEmpresa = "La fecha del primer pago es obligatoria.";
+    } elseif (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $fechaPrimerPagoAcuerdo)) {
+        $errorEmpresa = "La fecha del primer pago debe tener formato valido.";
+    } elseif (!checkdate((int)substr($fechaPrimerPagoAcuerdo, 5, 2), (int)substr($fechaPrimerPagoAcuerdo, 8, 2), (int)substr($fechaPrimerPagoAcuerdo, 0, 4))) {
+        $errorEmpresa = "La fecha del primer pago debe ser valida.";
     } elseif ($periodoDesdeAcuerdo === "") {
         $errorEmpresa = "El período es obligatorio.";
     } elseif ($periodoHastaAcuerdo === "") {
@@ -1185,6 +1194,7 @@ if (isset($_POST["guardar_acuerdo"])) {
             "pagos_previos_ids" => $pagosPreviosIdsAcuerdo,
             "periodo_desde" => $periodoDesdeAcuerdo,
             "periodo_hasta" => $periodoHastaAcuerdo,
+            "fecha_primer_pago" => $fechaPrimerPagoAcuerdo,
             "observaciones" => trim($_POST["acuerdo_observaciones"] ?? "")
         ], $acuerdoEditado, $errorGuardarAcuerdo, $acuerdoAnteriorHistorico);
 
@@ -1491,6 +1501,7 @@ $acuerdoForm = [
     "pagos_previos_ids" => isset($_POST["pagos_previos_ids"]) && is_array($_POST["pagos_previos_ids"]) ? $_POST["pagos_previos_ids"] : [],
     "periodo_desde" => $_POST["acuerdo_periodo_desde"] ?? "",
     "periodo_hasta" => $_POST["acuerdo_periodo_hasta"] ?? "",
+    "fecha_primer_pago" => $_POST["acuerdo_fecha_primer_pago"] ?? "",
     "observaciones" => $_POST["acuerdo_observaciones"] ?? ""
 ];
 
@@ -2115,7 +2126,12 @@ Comprobante actual:
 </div>
 
 <div class="campo">
-<label for="acuerdoPeriodoDesde">Período desde</label>
+<label for="acuerdoFechaPrimerPago">Fecha 1&deg; pago</label>
+<input type="date" id="acuerdoFechaPrimerPago" name="acuerdo_fecha_primer_pago" required value="<?= e(substr(trim($acuerdoForm["fecha_primer_pago"] ?? ""), 0, 10)) ?>">
+</div>
+
+<div class="campo">
+<label for="acuerdoPeriodoDesde">Per&iacute;odo desde</label>
 <input type="text" id="acuerdoPeriodoDesde" name="acuerdo_periodo_desde" class="periodo-input" placeholder="MM/AA" maxlength="5" inputmode="numeric" pattern="(0[1-9]|1[0-2])\/[0-9]{2}" required value="<?= e(periodoParaInput($acuerdoForm["periodo_desde"] ?? "")) ?>">
 </div>
 
@@ -2682,6 +2698,7 @@ ${candidatos.map(({ pago, dentro }) => `<tr class="${dentro ? "" : "pago-fuera-p
         const montoCuota = Number(acuerdoFormEl.querySelector('input[name="acuerdo_monto_cuota"]')?.value || 0);
         const cuotasPrevias = Number(acuerdoFormEl.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]')?.value || 0);
         const pagosPrevios = pagosPreviosSeleccionados();
+        const fechaPrimerPago = acuerdoFormEl.querySelector('input[name="acuerdo_fecha_primer_pago"]');
         const periodoDesde = acuerdoFormEl.querySelector('input[name="acuerdo_periodo_desde"]');
         const periodoHasta = acuerdoFormEl.querySelector('input[name="acuerdo_periodo_hasta"]');
 
@@ -2723,6 +2740,13 @@ ${candidatos.map(({ pago, dentro }) => `<tr class="${dentro ? "" : "pago-fuera-p
             event.preventDefault();
             alert("El monto de cada cuota debe ser mayor a 0.");
             acuerdoFormEl.querySelector('input[name="acuerdo_monto_cuota"]')?.focus();
+            return;
+        }
+
+        if (!fechaPrimerPago?.value) {
+            event.preventDefault();
+            alert("La fecha del primer pago es obligatoria.");
+            fechaPrimerPago?.focus();
             return;
         }
 
@@ -3304,7 +3328,7 @@ function periodoDesdeIndice(indice) {
 }
 
 function fechaBaseAcuerdoCliente(acuerdo) {
-    const fecha = (acuerdo?.fecha_carga_acuerdo || "").toString().slice(0, 10);
+    const fecha = (acuerdo?.fecha_primer_pago || acuerdo?.fecha_carga_acuerdo || "").toString().slice(0, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) return null;
     const [anio, mes, dia] = fecha.split("-").map(Number);
     return { anio, mes, dia, iso: fecha };
@@ -3383,6 +3407,7 @@ function acuerdoEmpresaTipo(empresa, tipo) {
         periodo_desde: "",
         periodo_hasta: "",
         fecha_carga_acuerdo: "",
+        fecha_primer_pago: "",
         usuario_carga_acuerdo: "",
         observaciones: "",
         activa: true
@@ -3873,11 +3898,13 @@ function renderAcuerdoHistorico(acuerdo) {
     const periodoDesde = periodoNormalizado(acuerdo.periodo_desde || "");
     const periodoHasta = periodoNormalizado(acuerdo.periodo_hasta || "");
     const periodo = periodoDesde && periodoHasta ? `${periodoDesde} a ${periodoHasta}` : (periodoDesde || periodoHasta || "-");
+    const fechaPrimerPago = fechaBaseAcuerdoCliente(acuerdo)?.iso || "";
     const anio = periodoDesde.length === 5 ? `20${periodoDesde.slice(3)}` : periodoDesde;
     const titulo = periodoDesde ? `Acuerdo ${escapeHtml(anio)}` : `Acuerdo #${escapeHtml(String(acuerdo.id || ""))}`;
     return `<div class="historial-acuerdo-item">
 <strong>${titulo}</strong>
 <div>${escapeHtml(periodo)} - ${cuotas} cuotas - ${dineroCliente(acuerdo.monto_total)}</div>
+<div>Fecha 1&deg; pago: ${fechaPrimerPago ? escapeHtml(fechaMostrarCliente(fechaPrimerPago)) : '<span class="sin">Sin fecha</span>'}</div>
 </div>`;
 }
 
@@ -3892,7 +3919,7 @@ function resumenDetalleAcuerdo(empresa, tipo) {
     const resumen = resumenCalculoAcuerdoCliente(empresa, tipo);
     const proxima = proximaCuotaPendienteCliente(empresa, tipo);
     const estadoClase = proxima?.estado === "Vencida" ? "estado-deudor" : (proxima?.estado === "Vence hoy" ? "estado-parcial" : "estado-ok");
-    const fechaBase = fechaBaseAcuerdoCliente(acuerdo)?.iso || "";
+    const fechaPrimerPago = fechaBaseAcuerdoCliente(acuerdo)?.iso || "";
     const responsable = acuerdo.usuario_carga_acuerdo || "";
     const historial = anteriores.length ? `<hr><h3 class="mini-title">Acuerdos anteriores</h3>${anteriores.map(renderAcuerdoHistorico).join("")}` : "";
 
@@ -3901,7 +3928,7 @@ function resumenDetalleAcuerdo(empresa, tipo) {
 <div>Monto total acuerdo: ${dineroCliente(resumen.montoTotal)}</div>
 <div>Cuotas totales: ${resumen.cantidad}</div>
 <div>Monto cuota: ${dineroCliente(resumen.montoCuota)}</div>
-<div>Fecha base del acuerdo: ${fechaBase ? escapeHtml(fechaMostrarCliente(fechaBase)) : '<span class="sin">Sin fecha base</span>'}</div>
+<div>Fecha 1&deg; pago: ${fechaPrimerPago ? escapeHtml(fechaMostrarCliente(fechaPrimerPago)) : '<span class="sin">Sin fecha</span>'}</div>
 <div>Responsable: ${responsable ? escapeHtml(responsable) : '<span class="sin">Sin responsable</span>'}</div>
 <div>Cuotas previas declaradas: ${resumen.previas}</div>
 <div>Pagos previos vinculados: ${resumen.pagosPrevios.length}</div>
@@ -3930,11 +3957,13 @@ function resumenDetalleAcuerdosAnteriores(empresa, tipo) {
         const desde = periodoNormalizado(acuerdo.periodo_desde || "");
         const hasta = periodoNormalizado(acuerdo.periodo_hasta || "");
         const periodo = [desde, hasta].filter(Boolean).join(" a ");
+        const fechaPrimerPago = fechaBaseAcuerdoCliente(acuerdo)?.iso || "";
         const responsable = acuerdo.usuario_carga_acuerdo || "";
         return `<div class="box">
 <div class="label">Acuerdo ${escapeHtml(periodo || "-")}</div>
 <div>Monto: ${dineroCliente(resumen.montoTotal)}</div>
 <div>Cuotas: ${resumen.cantidad}</div>
+<div>Fecha 1&deg; pago: ${fechaPrimerPago ? escapeHtml(fechaMostrarCliente(fechaPrimerPago)) : '<span class="sin">Sin fecha</span>'}</div>
 <div>Responsable: ${responsable ? escapeHtml(responsable) : '<span class="sin">Sin responsable</span>'}</div>
 <div>Estado: <span class="estado estado-previa">anterior</span></div>
 <div>Saldo al cierre: ${dineroCliente(resumen.saldo)}</div>
@@ -4212,6 +4241,7 @@ function limpiarFormularioAcuerdo(limpiarTipo = true) {
     form.querySelector('input[name="acuerdo_cantidad_cuotas"]').value = "";
     form.querySelector('input[name="acuerdo_monto_cuota"]').value = "";
     form.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]').value = "0";
+    form.querySelector('input[name="acuerdo_fecha_primer_pago"]').value = "";
     form.querySelector('input[name="acuerdo_periodo_desde"]').value = "";
     form.querySelector('input[name="acuerdo_periodo_hasta"]').value = "";
     form.querySelector('textarea[name="acuerdo_observaciones"]').value = "";
@@ -4230,6 +4260,7 @@ function cargarAcuerdoParaEditar(empresa, tipo) {
     form.querySelector('input[name="acuerdo_cantidad_cuotas"]').value = acuerdo.cantidad_cuotas || "2";
     form.querySelector('input[name="acuerdo_monto_cuota"]').value = acuerdo.monto_cuota || "";
     form.querySelector('input[name="acuerdo_cuotas_pagadas_previas"]').value = acuerdo.cuotas_pagadas_previas || "0";
+    form.querySelector('input[name="acuerdo_fecha_primer_pago"]').value = (acuerdo.fecha_primer_pago || acuerdo.fecha_carga_acuerdo || "").toString().slice(0, 10);
     form.querySelector('input[name="acuerdo_periodo_desde"]').value = periodoNormalizado(acuerdo.periodo_desde || "");
     form.querySelector('input[name="acuerdo_periodo_hasta"]').value = periodoNormalizado(acuerdo.periodo_hasta || "");
     form.querySelector('textarea[name="acuerdo_observaciones"]').value = acuerdo.observaciones || "";
