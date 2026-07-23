@@ -343,6 +343,25 @@ function enviarCsv($nombreArchivo, $columnas, $filas) {
     exit;
 }
 
+function enviarCsvConSecciones($nombreArchivo, $filas) {
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+
+    header("Content-Type: text/csv; charset=UTF-8");
+    header("Content-Disposition: attachment; filename=\"" . $nombreArchivo . "\"");
+    header("Cache-Control: no-store, no-cache, must-revalidate");
+    header("Pragma: no-cache");
+
+    $salida = fopen("php://output", "w");
+    fwrite($salida, "\xEF\xBB\xBF");
+    foreach ($filas as $fila) {
+        fputcsv($salida, $fila, ";");
+    }
+    fclose($salida);
+    exit;
+}
+
 function dinero($n) {
     return "$" . number_format(floatval($n), 2, ",", ".");
 }
@@ -380,6 +399,20 @@ function periodoDesdeIndice($indice) {
     $anioCompleto = intdiv($indice - 1, 12);
     $mes = $indice - $anioCompleto * 12;
     return str_pad((string)$mes, 2, "0", STR_PAD_LEFT) . "/" . substr((string)$anioCompleto, -2);
+}
+
+function fechaCorrespondePeriodo($fecha, $periodo) {
+    $fecha = trim($fecha ?? "");
+    $periodo = periodoParaInput($periodo);
+    if ($fecha === "" || !periodoValido($periodo)) return false;
+
+    try {
+        $fechaObj = new DateTimeImmutable(substr($fecha, 0, 10));
+    } catch (Throwable $e) {
+        return false;
+    }
+
+    return $fechaObj->format("m/y") === $periodo;
 }
 
 function fechaBaseAcuerdo($acuerdo) {
@@ -989,6 +1022,135 @@ if (isset($_GET["exportar"]) && $_GET["exportar"] === "informe") {
     $periodoExport = periodoParaInput($_GET["periodo"] ?? "");
     $tipoExport = $_GET["tipo"] ?? "";
     $tiposExport = in_array($tipoExport, ["Obra Social", "Sindicato", "Mutual"], true) ? [$tipoExport] : ["Obra Social", "Sindicato", "Mutual"];
+    $filasPagos = [];
+    $filasVencidas = [];
+    $empresasQuePagaron = [];
+    $totalPagosRegistrados = 0;
+    $totalCobrado = 0;
+    $totalAdeudadoVencido = 0;
+    $hoyInforme = date("Y-m-d");
+
+    if (periodoValido($periodoExport)) {
+        foreach ($pagos as $pago) {
+            if (!in_array($pago["tipo"] ?? "", $tiposExport, true)) continue;
+            if (periodoParaInput($pago["periodo"] ?? "") !== $periodoExport) continue;
+
+            $montoPago = floatval($pago["monto"] ?? 0);
+            if ($montoPago <= 0) continue;
+
+            $empresa = buscarEmpresa($empresas, $pago["empresa_id"] ?? "");
+            $empresaId = $empresa["id"] ?? ($pago["empresa_id"] ?? "");
+            if ($empresaId !== "") $empresasQuePagaron[$empresaId] = true;
+
+            $tipoPago = $empresa && pagoVinculadoComoPrevio($pago, $empresa)
+                ? "Cuota de acuerdo"
+                : tipoPagoCompatible($pago, $empresas);
+
+            $filasPagos[] = [
+                $empresa["razon"] ?? "Empresa eliminada",
+                $empresa["cuit"] ?? "",
+                $pago["tipo"] ?? "",
+                $tipoPago,
+                periodoParaInput($pago["periodo"] ?? ""),
+                $pago["fecha"] ?? "",
+                $pago["forma_pago"] ?? "",
+                $montoPago,
+                $pago["observaciones"] ?? "",
+                $pago["comprobante"] ?? ""
+            ];
+            $totalPagosRegistrados++;
+            $totalCobrado += $montoPago;
+        }
+
+        foreach ($empresas as $empresa) {
+            if (!empresaActiva($empresa)) continue;
+            $empresaId = $empresa["id"] ?? "";
+            if ($empresaId === "") continue;
+
+            foreach ($tiposExport as $tipo) {
+                $acuerdo = acuerdoEmpresa($empresa, $tipo);
+                if (!acuerdoValidoEmpresaTipo($empresa, $tipo)) continue;
+                if (isset($acuerdo["activa"]) && !$acuerdo["activa"]) continue;
+
+                $cantidadCuotas = max(intval($acuerdo["cantidad_cuotas"] ?? 0), 0);
+                for ($numeroCuota = 1; $numeroCuota <= $cantidadCuotas; $numeroCuota++) {
+                    $periodoCuota = periodoCuotaAcuerdo($acuerdo, $numeroCuota);
+                    if ($periodoCuota !== $periodoExport) continue;
+
+                    $fechaVencimiento = fechaVencimientoCuotaAcuerdo($acuerdo, $numeroCuota);
+                    if ($fechaVencimiento === "" || $fechaVencimiento > $hoyInforme) continue;
+                    if (cuotaAcuerdoPagada($acuerdo, $empresaId, $tipo, $numeroCuota, $periodoCuota, $pagos, $empresas)) continue;
+
+                    $montoCuota = max(floatval($acuerdo["monto_cuota"] ?? 0), 0);
+                    $diasAtraso = max((new DateTimeImmutable($fechaVencimiento))->diff(new DateTimeImmutable($hoyInforme))->days, 0);
+                    $filasVencidas[] = [
+                        $empresa["razon"] ?? "",
+                        $empresa["cuit"] ?? "",
+                        $tipo,
+                        $numeroCuota,
+                        $cantidadCuotas,
+                        $periodoCuota,
+                        $fechaVencimiento,
+                        $montoCuota,
+                        $diasAtraso,
+                        trim($acuerdo["usuario_carga_acuerdo"] ?? ""),
+                        "VENCIDA SIN PAGAR"
+                    ];
+                    $totalAdeudadoVencido += $montoCuota;
+                }
+            }
+        }
+    }
+
+    usort($filasPagos, fn($a, $b) => strcmp($a[0], $b[0]) ?: strcmp($a[5], $b[5]));
+    usort($filasVencidas, fn($a, $b) => strcmp($a[6], $b[6]) ?: strcmp($a[0], $b[0]));
+
+    $errorAcuerdosInforme = null;
+    $acuerdosInforme = acuerdosHistoricosSql($errorAcuerdosInforme);
+    $cantidadAcuerdosCargados = 0;
+    if (is_array($acuerdosInforme)) {
+        foreach ($acuerdosInforme as $acuerdoInforme) {
+            if (!in_array($acuerdoInforme["tipo"] ?? "", $tiposExport, true)) continue;
+            if (
+                fechaCorrespondePeriodo($acuerdoInforme["fecha_creacion"] ?? "", $periodoExport) ||
+                fechaCorrespondePeriodo($acuerdoInforme["fecha_carga_acuerdo"] ?? "", $periodoExport)
+            ) {
+                $cantidadAcuerdosCargados++;
+            }
+        }
+    }
+
+    $tipoConsultado = $tipoExport !== "" ? $tipoExport : "Todos";
+    $filasInforme = [
+        ["RESUMEN GENERAL DEL INFORME"],
+        ["Periodo consultado", $periodoExport],
+        ["Tipo consultado", $tipoConsultado],
+        ["Cantidad de empresas que pagaron", count($empresasQuePagaron)],
+        ["Cantidad de pagos registrados", $totalPagosRegistrados],
+        ["Total cobrado", $totalCobrado],
+        ["Cantidad de acuerdos nuevos cargados", $cantidadAcuerdosCargados],
+        ["Cantidad de cuotas de acuerdo vencidas y no pagadas", count($filasVencidas)],
+        ["Total adeudado por cuotas vencidas", $totalAdeudadoVencido],
+        [],
+        ["PAGOS REGISTRADOS"],
+        ["Empresa", "CUIT", "Tipo", "Tipo de pago", "Periodo", "Fecha del pago", "Forma de pago", "Monto", "Observaciones", "Comprobante"]
+    ];
+
+    $filasInforme = array_merge($filasInforme, $filasPagos ?: [["Sin pagos registrados en el periodo consultado"]]);
+    $filasInforme[] = [];
+    $filasInforme[] = ["Cantidad de empresas que pagaron", count($empresasQuePagaron)];
+    $filasInforme[] = ["Cantidad total de pagos registrados", $totalPagosRegistrados];
+    $filasInforme[] = ["Total cobrado en el periodo", $totalCobrado];
+    $filasInforme[] = [];
+    $filasInforme[] = ["CUOTAS DE ACUERDO VENCIDAS Y NO PAGADAS"];
+    $filasInforme[] = ["Empresa", "CUIT", "Tipo de acuerdo", "Numero de cuota", "Total de cuotas", "Periodo de la cuota", "Fecha de vencimiento", "Monto de la cuota", "Dias de atraso", "Responsable del acuerdo", "Estado"];
+    $filasInforme = array_merge($filasInforme, $filasVencidas ?: [["Sin cuotas de acuerdo vencidas y no pagadas en el periodo consultado"]]);
+    $filasInforme[] = [];
+    $filasInforme[] = ["Cantidad de cuotas vencidas sin pagar", count($filasVencidas)];
+    $filasInforme[] = ["Total adeudado por esas cuotas vencidas", $totalAdeudadoVencido];
+
+    enviarCsvConSecciones("informe_periodo_" . ($periodoExport ? str_replace("/", "-", $periodoExport) : date("Y-m-d")) . ".csv", $filasInforme);
+
     $filas = [];
 
     if (periodoValido($periodoExport)) {
