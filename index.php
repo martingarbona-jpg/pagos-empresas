@@ -461,6 +461,68 @@ function rutaComprobanteFisico($comprobante, $uploadDir) {
     return $uploadDir . "/" . $archivo;
 }
 
+function comprobantesPago($pago) {
+    $comprobantes = [];
+    $lista = $pago["comprobantes"] ?? [];
+
+    if (is_array($lista)) {
+        foreach ($lista as $comprobante) {
+            $comprobante = trim((string)$comprobante);
+            if ($comprobante !== "") $comprobantes[] = $comprobante;
+        }
+    }
+
+    $comprobanteViejo = trim((string)($pago["comprobante"] ?? ""));
+    if ($comprobanteViejo !== "") $comprobantes[] = $comprobanteViejo;
+
+    return array_values(array_unique($comprobantes));
+}
+
+function comprobantePrincipalPago($pago) {
+    $comprobantes = comprobantesPago($pago);
+    return $comprobantes[0] ?? "";
+}
+
+function subirComprobantesPago($archivos, $uploadDir, $empresa, &$errorPago) {
+    $guardados = [];
+    $permitidos = ["pdf", "jpg", "jpeg", "png"];
+    if (!isset($archivos["name"])) return $guardados;
+
+    $nombres = is_array($archivos["name"]) ? $archivos["name"] : [$archivos["name"]];
+    $tmpNames = is_array($archivos["tmp_name"] ?? null) ? $archivos["tmp_name"] : [($archivos["tmp_name"] ?? "")];
+    $errores = is_array($archivos["error"] ?? null) ? $archivos["error"] : [($archivos["error"] ?? UPLOAD_ERR_NO_FILE)];
+    $cuit = preg_replace('/[^0-9]/', '', $empresa["cuit"] ?? "");
+    $razon = limpiarArchivo($empresa["razon"] ?? "empresa");
+
+    $pendientes = [];
+    foreach ($nombres as $indice => $nombreOriginal) {
+        if (($errores[$indice] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE || trim((string)$nombreOriginal) === "") continue;
+        if (($errores[$indice] ?? UPLOAD_ERR_OK) !== UPLOAD_ERR_OK) {
+            $errorPago = "No se pudo subir uno de los comprobantes.";
+            return [];
+        }
+
+        $ext = strtolower(pathinfo($nombreOriginal, PATHINFO_EXTENSION));
+        if (!in_array($ext, $permitidos, true)) {
+            $errorPago = "Los comprobantes deben ser PDF, JPG, JPEG o PNG.";
+            return [];
+        }
+
+        $pendientes[] = ["indice" => $indice, "ext" => $ext];
+    }
+
+    foreach ($pendientes as $pendiente) {
+        $indice = $pendiente["indice"];
+        $ext = $pendiente["ext"];
+        $nombreArchivo = date("Ymd_His") . "_" . str_pad((string)($indice + 1), 2, "0", STR_PAD_LEFT) . "_" . $cuit . "_" . $razon . "." . $ext;
+        if (move_uploaded_file($tmpNames[$indice] ?? "", $uploadDir . "/" . $nombreArchivo)) {
+            $guardados[] = "comprobantes/" . $nombreArchivo;
+        }
+    }
+
+    return $guardados;
+}
+
 function buscarEmpresa($empresas, $id) {
     foreach ($empresas as $e) {
         if (($e["id"] ?? "") === $id) return $e;
@@ -654,9 +716,11 @@ function resumenFinancieroEmpresaTipo($empresa, $tipo, $pagos) {
 }
 
 function eliminarComprobantePago($pago, $uploadDir) {
-    $rutaFisica = rutaComprobanteFisico($pago["comprobante"] ?? "", $uploadDir);
-    if ($rutaFisica && is_file($rutaFisica)) {
-        @unlink($rutaFisica);
+    foreach (comprobantesPago($pago) as $comprobante) {
+        $rutaFisica = rutaComprobanteFisico($comprobante, $uploadDir);
+        if ($rutaFisica && is_file($rutaFisica)) {
+            @unlink($rutaFisica);
+        }
     }
 }
 
@@ -1056,7 +1120,7 @@ if (isset($_GET["exportar"]) && $_GET["exportar"] === "informe") {
                 $pago["forma_pago"] ?? "",
                 $montoPago,
                 $pago["observaciones"] ?? "",
-                $pago["comprobante"] ?? ""
+                implode(" | ", comprobantesPago($pago))
             ];
             $totalPagosRegistrados++;
             $totalCobrado += $montoPago;
@@ -1387,7 +1451,6 @@ if (isset($_POST["guardar_acuerdo"])) {
 if (isset($_POST["guardar_pago"])) {
     $pagoIdActual = trim($_POST["pago_id"] ?? "");
     $id = $pagoIdActual !== "" ? $pagoIdActual : uniqid("pago_");
-    $comprobante = $_POST["comprobante_actual"] ?? "";
     $periodo = trim($_POST["periodo"] ?? "");
     $empresaIdPago = $_POST["empresa_id"] ?? "";
     $tipoPago = $_POST["tipo"] ?? "";
@@ -1402,6 +1465,8 @@ if (isset($_POST["guardar_pago"])) {
         }
     }
 
+    $comprobantes = comprobantesPago(is_array($pagoExistente) ? $pagoExistente : ["comprobantes" => ($_POST["comprobantes_actuales"] ?? [])]);
+    $comprobantesAgregados = [];
     $cheques = [];
     $fechasCheque = isset($_POST["cheque_fecha"]) && is_array($_POST["cheque_fecha"]) ? $_POST["cheque_fecha"] : [];
     $indicesCheque = isset($_POST["cheque_indice"]) && is_array($_POST["cheque_indice"]) ? $_POST["cheque_indice"] : [];
@@ -1442,19 +1507,10 @@ if (isset($_POST["guardar_pago"])) {
         $errorPago = "Todas las fechas de cobro de los cheques deben estar completas.";
     } elseif ($formaPago === "Cheque" && count(array_filter($cheques, fn($cheque) => !fechaChequeValida($cheque["fecha_cobro"] ?? ""))) > 0) {
         $errorPago = "Todas las fechas de cobro de los cheques deben ser válidas.";
-    } elseif (!empty($_FILES["comprobante"]["name"])) {
-        $ext = strtolower(pathinfo($_FILES["comprobante"]["name"], PATHINFO_EXTENSION));
-        $permitidos = ["pdf", "jpg", "jpeg", "png"];
-
-        if (in_array($ext, $permitidos)) {
-            $empresa = buscarEmpresa($empresas, $_POST["empresa_id"]);
-            $cuit = preg_replace('/[^0-9]/', '', $empresa["cuit"] ?? "");
-            $razon = limpiarArchivo($empresa["razon"] ?? "empresa");
-            $nombreArchivo = date("Ymd_His") . "_" . $cuit . "_" . $razon . "." . $ext;
-
-            if (move_uploaded_file($_FILES["comprobante"]["tmp_name"], $uploadDir . "/" . $nombreArchivo)) {
-                $comprobante = "comprobantes/" . $nombreArchivo;
-            }
+    } elseif (!empty($_FILES["comprobantes"]["name"])) {
+        $comprobantesAgregados = subirComprobantesPago($_FILES["comprobantes"], $uploadDir, $empresaPago ?: [], $errorPago);
+        if ($errorPago === "") {
+            $comprobantes = array_values(array_unique(array_merge($comprobantes, $comprobantesAgregados)));
         }
     }
 
@@ -1468,7 +1524,8 @@ if (isset($_POST["guardar_pago"])) {
             "monto" => floatval($_POST["monto"] ?? 0),
             "tipo_pago" => $tipoDePago,
             "periodo" => $periodo,
-            "comprobante" => $comprobante,
+            "comprobantes" => $comprobantes,
+            "comprobante" => $comprobantes[0] ?? "",
             "observaciones" => trim($_POST["observaciones_pago"] ?? ""),
             "fecha_carga" => date("Y-m-d H:i:s")
         ];
@@ -1501,6 +1558,13 @@ if (isset($_POST["guardar_pago"])) {
             $editado ? "editar_pago" : "crear_pago",
             ($editado ? "Editó pago de " : "Cargó pago de ") . detallePago($nuevo, $empresas) . " - " . $tipoDePago
         );
+        if (count($comprobantesAgregados) > 0) {
+            registrarAuditoria(
+                $auditoriaFile,
+                "agregar_comprobantes_pago",
+                "AgregÃ³ " . count($comprobantesAgregados) . " comprobantes al pago de " . (($empresaPago["razon"] ?? "Empresa") . " - " . $tipoPago . " - " . periodoParaInput($periodo))
+            );
+        }
         if (!$editado && count($cheques) > 0) {
             registrarAuditoria(
                 $auditoriaFile,
@@ -1588,6 +1652,7 @@ if (isset($_GET["eliminar_pago"])) {
         $pagoEliminado["fecha_eliminacion"] = date("Y-m-d H:i:s");
         $pagoEliminado["motivo"] = trim($_GET["motivo"] ?? "");
         $papeleraPagos[] = $pagoEliminado;
+        eliminarComprobantePago($pagoEliminado, $uploadDir);
         $pagos = array_values(array_filter($pagos, fn($p) => ($p["id"] ?? "") !== $id));
         guardarJson($pagosFile, $pagos);
         guardarJson($papeleraPagosFile, $papeleraPagos);
@@ -1617,15 +1682,28 @@ if (isset($_GET["eliminar_acuerdo"], $_GET["tipo_acuerdo"])) {
 
 if (isset($_GET["eliminar_comprobante"])) {
     $id = $_GET["eliminar_comprobante"];
+    $indiceComprobante = filter_var($_GET["indice"] ?? 0, FILTER_VALIDATE_INT);
+    if ($indiceComprobante === false || $indiceComprobante < 0) $indiceComprobante = 0;
 
     foreach ($pagos as $k => $p) {
         if (($p["id"] ?? "") === $id) {
-            $rutaFisica = rutaComprobanteFisico($p["comprobante"] ?? "", $uploadDir);
-            if ($rutaFisica && is_file($rutaFisica)) {
-                @unlink($rutaFisica);
-            }
+            $comprobantes = comprobantesPago($p);
+            if (isset($comprobantes[$indiceComprobante])) {
+                $rutaFisica = rutaComprobanteFisico($comprobantes[$indiceComprobante], $uploadDir);
+                if ($rutaFisica && is_file($rutaFisica)) {
+                    @unlink($rutaFisica);
+                }
 
-            $pagos[$k]["comprobante"] = "";
+                array_splice($comprobantes, $indiceComprobante, 1);
+                $pagos[$k]["comprobantes"] = array_values($comprobantes);
+                $pagos[$k]["comprobante"] = $comprobantes[0] ?? "";
+                $empresaComprobante = buscarEmpresa($empresas, $p["empresa_id"] ?? "");
+                registrarAuditoria(
+                    $auditoriaFile,
+                    "eliminar_comprobante_pago",
+                    "EliminÃ³ un comprobante del pago de " . (($empresaComprobante["razon"] ?? "Empresa") . " - " . ($p["tipo"] ?? "") . " - " . periodoParaInput($p["periodo"] ?? ""))
+                );
+            }
             break;
         }
     }
@@ -1688,7 +1766,8 @@ if ($errorPago !== "" && isset($_POST["guardar_pago"])) {
         "monto" => $_POST["monto"] ?? "",
         "tipo_pago" => $_POST["tipo_pago"] ?? "",
         "periodo" => $_POST["periodo"] ?? "",
-        "comprobante" => $_POST["comprobante_actual"] ?? "",
+        "comprobantes" => $_POST["comprobantes_actuales"] ?? [],
+        "comprobante" => ($_POST["comprobantes_actuales"][0] ?? ""),
         "observaciones" => $_POST["observaciones_pago"] ?? "",
         "cheques" => $cheques ?? []
     ];
@@ -2116,7 +2195,9 @@ if ($advertenciaEmpresa) $empresasMostradas = $coincidenciasEmpresa["parecidas"]
 
 <form method="post" enctype="multipart/form-data">
 <input type="hidden" name="pago_id" value="<?= e($editarPago["id"] ?? "") ?>">
-<input type="hidden" name="comprobante_actual" value="<?= e($editarPago["comprobante"] ?? "") ?>">
+<?php foreach(comprobantesPago($editarPago ?? []) as $comprobanteActual): ?>
+<input type="hidden" name="comprobantes_actuales[]" value="<?= e($comprobanteActual) ?>">
+<?php endforeach; ?>
 
 <div class="grid">
 <?php $empresaPagoSeleccionada = buscarEmpresa($empresas, $editarPago["empresa_id"] ?? ""); ?>
@@ -2175,8 +2256,8 @@ if ($advertenciaEmpresa) $empresasMostradas = $coincidenciasEmpresa["parecidas"]
 </div>
 
 <div class="campo">
-<label for="pagoComprobante">Comprobante</label>
-<input type="file" id="pagoComprobante" name="comprobante" accept=".pdf,.jpg,.jpeg,.png">
+<label for="pagoComprobante">Comprobantes</label>
+<input type="file" id="pagoComprobante" name="comprobantes[]" accept=".pdf,.jpg,.jpeg,.png" multiple>
 </div>
 </div>
 
@@ -2212,7 +2293,22 @@ $mostrarChequesFormulario = ($editarPago["forma_pago"] ?? "") === "Cheque";
 <p class="error"><?= e($errorPago) ?></p>
 <?php endif; ?>
 
-<?php if($editarPago && !empty($editarPago["comprobante"])): ?>
+<?php $comprobantesEditarPago = comprobantesPago($editarPago ?? []); ?>
+<?php if($editarPago && $comprobantesEditarPago): ?>
+<div class="comprobantes-list">
+<strong>Comprobantes actuales:</strong>
+<?php foreach($comprobantesEditarPago as $indiceComprobante => $comprobanteActual): ?>
+<p>
+Comprobante <?= e($indiceComprobante + 1) ?>:
+<a class="btn-secundario" href="<?= e($comprobanteActual) ?>" target="_blank">Ver</a>
+<a class="btn-secundario" href="<?= e($comprobanteActual) ?>" download>Descargar</a>
+<a class="btn-danger" href="?eliminar_comprobante=<?= e($editarPago["id"] ?? "") ?>&indice=<?= e($indiceComprobante) ?>" onclick="return confirm('Eliminar solo este comprobante del pago?')" title="Eliminar comprobante" aria-label="Eliminar comprobante">Eliminar</a>
+</p>
+<?php endforeach; ?>
+</div>
+<?php endif; ?>
+
+<?php if(false && $editarPago && !empty($editarPago["comprobante"])): ?>
 <p>
 Comprobante actual:
 <a class="btn-secundario" href="<?= e($editarPago["comprobante"]) ?>" target="_blank">👁️ Ver</a>
@@ -2622,7 +2718,12 @@ $esPagoPrevioVinculado = $emp && pagoVinculadoComoPrevio($p, $emp);
 <td><?= e($periodoPago) ?></td>
 <td><?= dinero($p["monto"] ?? 0) ?></td>
 <td>
-<?php if(!empty($p["comprobante"])): ?>
+<?php $comprobantesPagoRegistrado = comprobantesPago($p); ?>
+<?php if($comprobantesPagoRegistrado): ?>
+<?php foreach($comprobantesPagoRegistrado as $indiceComprobante => $comprobantePagoRegistrado): ?>
+<div>Comprobante <?= e($indiceComprobante + 1) ?> - <a href="<?= e($comprobantePagoRegistrado) ?>" target="_blank">Ver</a> / <a href="<?= e($comprobantePagoRegistrado) ?>" download>Descargar</a></div>
+<?php endforeach; ?>
+<?php elseif(false && !empty($p["comprobante"])): ?>
 <a href="<?= e($p["comprobante"]) ?>" target="_blank">👁️</a>
 <a href="<?= e($p["comprobante"]) ?>" download>⬇️</a>
 <?php else: ?>
@@ -2669,10 +2770,12 @@ $esPagoPrevioVinculado = $emp && pagoVinculadoComoPrevio($p, $emp);
 <option value="eliminar_acuerdo">Eliminar acuerdo</option>
 <option value="crear_pago">Crear pago</option>
 <option value="editar_pago">Editar pago</option>
+<option value="agregar_comprobantes_pago">Agregar comprobantes al pago</option>
 <option value="crear_pago_cheques">Crear pago con cheques</option>
 <option value="editar_fechas_cheques">Editar fechas de cheques</option>
 <option value="marcar_cheque_cobrado">Marcar cheque cobrado</option>
 <option value="eliminar_pago">Eliminar pago</option>
+<option value="eliminar_comprobante_pago">Eliminar comprobante del pago</option>
 <option value="descargar_backup">Descargar backup</option>
 </select>
 <input type="text" id="filtroAuditoriaTexto" placeholder="Buscar en detalle">
@@ -2719,6 +2822,18 @@ const pagosData = <?= json_encode($pagos, JSON_UNESCAPED_UNICODE | JSON_UNESCAPE
 const pagosPreviosFormData = <?= json_encode(array_values($acuerdoForm["pagos_previos_ids"] ?? []), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
 const tiposInforme = ["Obra Social", "Sindicato", "Mutual"];
 const tabInicial = <?= json_encode($tabInicial, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
+
+function comprobantesPagoCliente(pago) {
+    const lista = Array.isArray(pago?.comprobantes) ? pago.comprobantes : [];
+    const comprobanteViejo = pago?.comprobante ? [pago.comprobante] : [];
+    return [...new Set([...lista, ...comprobanteViejo].map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
+function renderComprobantesCliente(pago) {
+    const comprobantes = Array.isArray(pago) ? pago : comprobantesPagoCliente(pago);
+    if (!comprobantes.length) return '<span class="sin">Sin comprobante</span>';
+    return comprobantes.map((comp, index) => `Comprobante ${index + 1} - <a href="${escapeHtml(comp)}" target="_blank">Ver</a> / <a href="${escapeHtml(comp)}" download>Descargar</a>`).join("<br>");
+}
 
 const notificacionesCheques = document.getElementById("notificacionesCheques");
 const notificacionesToggle = document.getElementById("notificacionesToggle");
@@ -4216,6 +4331,8 @@ ${chequesEmpresa.length ? `<table><thead><tr><th>Fecha de cobro</th><th>Estado</
 <h3 class="mini-title">Pagos registrados</h3>
 ${pagosEmpresa.length ? `<table><thead><tr><th>Fecha</th><th>Tipo</th><th>Tipo de pago</th><th>Período</th><th>Monto</th><th>Forma</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>${pagosEmpresa.map((pago) => `<tr><td>${escapeHtml(pago.fecha || "")}</td><td>${escapeHtml(pago.tipo || "")}</td><td>${escapeHtml(tipoPagoCompatibleCliente(pago, empresa, pago.tipo || ""))}</td><td>${escapeHtml(periodoNormalizado(pago.periodo || ""))}</td><td>${dineroCliente(pago.monto)}</td><td>${escapeHtml(formaPagoConCheques(pago))}</td><td>${pagoVinculadoComoPrevioCliente(pago, empresa) ? '<span class="estado estado-previa">Cuota previa vinculada</span>' : '<span class="estado estado-ok">Pago registrado</span>'}</td><td><a class="btn-danger" href="?eliminar_pago=${encodeURIComponent(pago.id || "")}" onclick="return confirm('¿Eliminar este pago? Esta acción no elimina la empresa.')" title="Eliminar pago" aria-label="Eliminar pago">🗑️</a></td></tr>`).join("")}</tbody></table>` : '<p class="sin">Sin pagos registrados.</p>'}
 <br>
+<h3 class="mini-title">Comprobantes de pagos</h3>
+${pagosEmpresa.some((pago) => comprobantesPagoCliente(pago).length) ? `<table><thead><tr><th>Pago</th><th>Comprobantes</th></tr></thead><tbody>${pagosEmpresa.filter((pago) => comprobantesPagoCliente(pago).length).map((pago) => `<tr><td>${escapeHtml(tipoPagoCompatibleCliente(pago, empresa, pago.tipo || ""))} - ${escapeHtml(periodoNormalizado(pago.periodo || ""))}</td><td>${renderComprobantesCliente(pago)}</td></tr>`).join("")}</tbody></table>` : '<p class="sin">Sin comprobantes registrados.</p>'}
 <a class="btn-secundario" href="?editar_empresa=${encodeURIComponent(empresa.id || "")}">Editar empresa</a>
 ${empresaActivaCliente(empresa) ? `<a class="btn-danger" href="?eliminar_empresa=${encodeURIComponent(empresa.id || "")}" onclick="return confirm('La empresa quedará inactiva y sus pagos se conservarán. ¿Dar de baja empresa?')" title="Dar de baja empresa" aria-label="Dar de baja empresa">🗑️</a>` : ""}
 <button type="button" class="btn-small ficha-cargar-pago" data-empresa="${escapeHtml(empresa.id || "")}">Cargar pago</button>
@@ -4487,7 +4604,7 @@ function configurarInformePeriodo() {
             };
             actual.monto += Number(pago.monto) || 0;
             if (pago.fecha) actual.fechas.push(pago.fecha);
-            if (pago.comprobante) actual.comprobantes.push(pago.comprobante);
+            actual.comprobantes.push(...comprobantesPagoCliente(pago));
             if (pago.id) actual.ids.push(pago.id);
             if (vinculadoPrevio) actual.vinculadoPrevio = true;
             pagosAgrupados.set(clave, actual);
