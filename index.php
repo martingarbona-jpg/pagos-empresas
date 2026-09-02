@@ -18,10 +18,6 @@ $papeleraPagosFile = $dataDir . "/papelera_pagos.json";
 
 if (!is_dir($dataDir)) mkdir($dataDir, 0755, true);
 if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
-if (!file_exists($empresasFile)) file_put_contents($empresasFile, "[]");
-if (!file_exists($pagosFile)) file_put_contents($pagosFile, "[]");
-if (!file_exists($auditoriaFile)) file_put_contents($auditoriaFile, "[]");
-if (!file_exists($papeleraPagosFile)) file_put_contents($papeleraPagosFile, "[]");
 
 require_once __DIR__ . "/db.php";
 
@@ -37,6 +33,312 @@ function leerJson($file) {
 
 function guardarJson($file, $data) {
     file_put_contents($file, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), LOCK_EX);
+}
+
+function conexionSql(&$error = null) {
+    global $pdo;
+
+    if ($pdo instanceof PDO) return $pdo;
+
+    $error = "No se encontro una conexion PDO valida en db.php.";
+    return null;
+}
+
+function tablaSqlExiste($tabla) {
+    $error = null;
+    $pdo = conexionSql($error);
+    if (!$pdo) return false;
+
+    try {
+        $stmt = $pdo->prepare("SHOW TABLES LIKE ?");
+        $stmt->execute([$tabla]);
+        return $stmt->fetchColumn() !== false;
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+function columnasSql($tabla) {
+    static $cache = [];
+    if (isset($cache[$tabla])) return $cache[$tabla];
+
+    $error = null;
+    $pdo = conexionSql($error);
+    if (!$pdo) return $cache[$tabla] = [];
+
+    try {
+        $stmt = $pdo->query("SHOW COLUMNS FROM `$tabla`");
+        $cache[$tabla] = array_map(fn($fila) => $fila["Field"], $stmt->fetchAll());
+    } catch (Throwable $e) {
+        $cache[$tabla] = [];
+    }
+
+    return $cache[$tabla];
+}
+
+function columnaSqlExiste($tabla, $columna) {
+    return in_array($columna, columnasSql($tabla), true);
+}
+
+function valorJsonSql($valor) {
+    if ($valor === null || $valor === "") return [];
+    if (is_array($valor)) return $valor;
+    $decodificado = json_decode((string)$valor, true);
+    return is_array($decodificado) ? $decodificado : [];
+}
+
+function ejecutarInsertSql($tabla, $datos) {
+    $pdo = conexionSql($error);
+    if (!$pdo) return false;
+
+    $columnas = array_values(array_intersect(array_keys($datos), columnasSql($tabla)));
+    if (!$columnas) return false;
+
+    $campos = "`" . implode("`, `", $columnas) . "`";
+    $marcas = ":" . implode(", :", $columnas);
+    $params = [];
+    foreach ($columnas as $columna) {
+        $params[$columna] = $datos[$columna];
+    }
+
+    $stmt = $pdo->prepare("INSERT INTO `$tabla` ($campos) VALUES ($marcas)");
+    return $stmt->execute($params);
+}
+
+function ejecutarUpdateSql($tabla, $datos, $where, $paramsWhere) {
+    $pdo = conexionSql($error);
+    if (!$pdo) return false;
+
+    $columnas = array_values(array_intersect(array_keys($datos), columnasSql($tabla)));
+    if (!$columnas) return false;
+
+    $sets = [];
+    $params = [];
+    foreach ($columnas as $columna) {
+        $sets[] = "`$columna` = :set_$columna";
+        $params["set_$columna"] = $datos[$columna];
+    }
+    foreach ($paramsWhere as $clave => $valor) {
+        $params[$clave] = $valor;
+    }
+
+    $stmt = $pdo->prepare("UPDATE `$tabla` SET " . implode(", ", $sets) . " WHERE $where");
+    return $stmt->execute($params);
+}
+
+function normalizarEmpresaSql($fila) {
+    $jsonId = trim((string)($fila["json_id"] ?? ""));
+    return [
+        "id" => $jsonId,
+        "sql_id" => $fila["id"] ?? null,
+        "razon" => (string)($fila["razon"] ?? ($fila["razon_social"] ?? "")),
+        "cuit" => (string)($fila["cuit"] ?? ""),
+        "deuda_os" => floatval($fila["deuda_os"] ?? 0),
+        "deuda_sindicato" => floatval($fila["deuda_sindicato"] ?? 0),
+        "deuda_mutual" => floatval($fila["deuda_mutual"] ?? 0),
+        "observaciones" => (string)($fila["observaciones"] ?? ""),
+        "fecha_carga" => $fila["fecha_carga"] ?? "",
+        "activa" => intval($fila["activa"] ?? 1) === 1,
+        "acuerdos" => valorJsonSql($fila["acuerdos"] ?? null)
+    ];
+}
+
+function obtenerEmpresas() {
+    $pdo = conexionSql($error);
+    if (!$pdo || !tablaSqlExiste("empresas")) return [];
+
+    try {
+        $stmt = $pdo->query("SELECT * FROM empresas ORDER BY razon ASC, id ASC");
+        return array_map("normalizarEmpresaSql", $stmt->fetchAll());
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
+function guardarEmpresaSql($empresa) {
+    $pdo = conexionSql($error);
+    if (!$pdo) return false;
+
+    $jsonId = trim((string)($empresa["id"] ?? ""));
+    if ($jsonId === "") return false;
+
+    $datos = [
+        "json_id" => $jsonId,
+        "razon" => $empresa["razon"] ?? "",
+        "cuit" => $empresa["cuit"] ?? "",
+        "deuda_os" => floatval($empresa["deuda_os"] ?? 0),
+        "deuda_sindicato" => floatval($empresa["deuda_sindicato"] ?? 0),
+        "deuda_mutual" => floatval($empresa["deuda_mutual"] ?? 0),
+        "observaciones" => $empresa["observaciones"] ?? "",
+        "fecha_carga" => $empresa["fecha_carga"] ?? date("Y-m-d H:i:s"),
+        "activa" => empresaActiva($empresa) ? 1 : 0
+    ];
+
+    try {
+        $stmt = $pdo->prepare("SELECT id FROM empresas WHERE json_id = ? LIMIT 1");
+        $stmt->execute([$jsonId]);
+        if ($stmt->fetchColumn() !== false) {
+            unset($datos["json_id"]);
+            return ejecutarUpdateSql("empresas", $datos, "json_id = :json_id", ["json_id" => $jsonId]);
+        }
+
+        return ejecutarInsertSql("empresas", $datos);
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+function normalizarPagoSql($fila) {
+    $comprobantes = valorJsonSql($fila["comprobantes"] ?? null);
+    $comprobante = trim((string)($fila["comprobante"] ?? ""));
+    if ($comprobante !== "") $comprobantes[] = $comprobante;
+
+    $cheques = valorJsonSql($fila["cheques"] ?? null);
+
+    return [
+        "id" => (string)($fila["json_id"] ?? ($fila["id"] ?? "")),
+        "sql_id" => $fila["id"] ?? null,
+        "empresa_id" => (string)($fila["empresa_json_id"] ?? ($fila["empresa_id"] ?? "")),
+        "fecha" => $fila["fecha"] ?? "",
+        "tipo" => (string)($fila["tipo"] ?? ""),
+        "forma_pago" => (string)($fila["forma_pago"] ?? ""),
+        "monto" => floatval($fila["monto"] ?? 0),
+        "tipo_pago" => (string)($fila["tipo_pago"] ?? ""),
+        "pago_tipo" => (string)($fila["pago_tipo"] ?? ""),
+        "cuotas" => (string)($fila["cuotas"] ?? ""),
+        "periodo" => periodoParaInput($fila["periodo"] ?? ""),
+        "acuerdo_id" => (string)($fila["acuerdo_id"] ?? ""),
+        "comprobantes" => array_values(array_unique(array_filter($comprobantes, fn($item) => trim((string)$item) !== ""))),
+        "comprobante" => $comprobante,
+        "observaciones" => (string)($fila["observaciones"] ?? ""),
+        "cheques" => $cheques,
+        "fecha_carga" => $fila["fecha_carga"] ?? ""
+    ];
+}
+
+function obtenerPagos() {
+    $pdo = conexionSql($error);
+    if (!$pdo || !tablaSqlExiste("pagos")) return [];
+
+    try {
+        $stmt = $pdo->query("SELECT * FROM pagos ORDER BY fecha_carga ASC, id ASC");
+        return array_map("normalizarPagoSql", $stmt->fetchAll());
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
+function datosPagoSql($pago) {
+    return [
+        "json_id" => $pago["id"] ?? "",
+        "empresa_json_id" => $pago["empresa_id"] ?? "",
+        "empresa_id" => $pago["empresa_id"] ?? "",
+        "fecha" => $pago["fecha"] ?? null,
+        "tipo" => $pago["tipo"] ?? "",
+        "forma_pago" => $pago["forma_pago"] ?? "",
+        "monto" => floatval($pago["monto"] ?? 0),
+        "tipo_pago" => $pago["tipo_pago"] ?? "",
+        "pago_tipo" => $pago["pago_tipo"] ?? "",
+        "cuotas" => $pago["cuotas"] ?? "",
+        "periodo" => $pago["periodo"] ?? "",
+        "acuerdo_id" => $pago["acuerdo_id"] ?? "",
+        "comprobante" => $pago["comprobante"] ?? "",
+        "comprobantes" => json_encode(array_values($pago["comprobantes"] ?? []), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        "observaciones" => $pago["observaciones"] ?? "",
+        "cheques" => json_encode(array_values($pago["cheques"] ?? []), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        "fecha_carga" => $pago["fecha_carga"] ?? date("Y-m-d H:i:s")
+    ];
+}
+
+function guardarPagoSql($pago) {
+    $pdo = conexionSql($error);
+    if (!$pdo) return false;
+
+    $jsonId = trim((string)($pago["id"] ?? ""));
+    if ($jsonId === "") return false;
+
+    try {
+        $stmt = $pdo->prepare("SELECT id FROM pagos WHERE json_id = ? LIMIT 1");
+        $stmt->execute([$jsonId]);
+        $datos = datosPagoSql($pago);
+        if ($stmt->fetchColumn() !== false) {
+            unset($datos["json_id"]);
+            return ejecutarUpdateSql("pagos", $datos, "json_id = :json_id", ["json_id" => $jsonId]);
+        }
+
+        return ejecutarInsertSql("pagos", $datos);
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+function eliminarPagoSql($pagoId) {
+    $pdo = conexionSql($error);
+    if (!$pdo) return false;
+
+    try {
+        $stmt = $pdo->prepare("DELETE FROM pagos WHERE json_id = ?");
+        $stmt->execute([$pagoId]);
+        return $stmt->rowCount() > 0;
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+function obtenerAuditoria() {
+    $pdo = conexionSql($error);
+    if (!$pdo || !tablaSqlExiste("auditoria")) return [];
+
+    try {
+        $orden = columnaSqlExiste("auditoria", "fecha")
+            ? " ORDER BY fecha ASC" . (columnaSqlExiste("auditoria", "id") ? ", id ASC" : "")
+            : (columnaSqlExiste("auditoria", "id") ? " ORDER BY id ASC" : "");
+        $stmt = $pdo->query("SELECT * FROM auditoria$orden");
+        return array_map(fn($fila) => [
+            "fecha" => $fila["fecha"] ?? ($fila["fecha_carga"] ?? ""),
+            "usuario" => $fila["usuario"] ?? "",
+            "accion" => $fila["accion"] ?? "",
+            "detalle" => $fila["detalle"] ?? ""
+        ], $stmt->fetchAll());
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
+function registrarAuditoria($auditoriaFile, $accion, $detalle) {
+    $datos = [
+        "fecha" => date("Y-m-d H:i:s"),
+        "usuario" => usuarioActual() ?: "SISTEMA",
+        "accion" => $accion,
+        "detalle" => $detalle
+    ];
+
+    if (!tablaSqlExiste("auditoria")) return false;
+    return ejecutarInsertSql("auditoria", $datos);
+}
+
+function obtenerPapeleraPagos() {
+    $pdo = conexionSql($error);
+    if (!$pdo || !tablaSqlExiste("papelera_pagos")) return [];
+
+    try {
+        $orden = columnaSqlExiste("papelera_pagos", "fecha_eliminacion")
+            ? " ORDER BY fecha_eliminacion ASC" . (columnaSqlExiste("papelera_pagos", "id") ? ", id ASC" : "")
+            : (columnaSqlExiste("papelera_pagos", "id") ? " ORDER BY id ASC" : "");
+        $stmt = $pdo->query("SELECT * FROM papelera_pagos$orden");
+        return array_map("normalizarPagoSql", $stmt->fetchAll());
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
+function guardarPapeleraPagoSql($pago) {
+    if (!tablaSqlExiste("papelera_pagos")) return false;
+    return ejecutarInsertSql("papelera_pagos", array_merge(datosPagoSql($pago), [
+        "eliminado_por" => $pago["eliminado_por"] ?? "",
+        "fecha_eliminacion" => $pago["fecha_eliminacion"] ?? date("Y-m-d H:i:s"),
+        "motivo" => $pago["motivo"] ?? ""
+    ]));
 }
 
 function usuarioActual() {
@@ -63,24 +365,8 @@ function empresaActiva($empresa) {
     return !array_key_exists("activa", $empresa) || $empresa["activa"] !== false;
 }
 
-function registrarAuditoria($auditoriaFile, $accion, $detalle) {
-    $auditoria = leerJson($auditoriaFile);
-    $auditoria[] = [
-        "fecha" => date("Y-m-d H:i:s"),
-        "usuario" => usuarioActual() ?: "SISTEMA",
-        "accion" => $accion,
-        "detalle" => $detalle
-    ];
-    guardarJson($auditoriaFile, $auditoria);
-}
-
 function conexionAcuerdos(&$error = null) {
-    global $pdo;
-
-    if ($pdo instanceof PDO) return $pdo;
-
-    $error = "No se encontro una conexion PDO valida en db.php para acuerdos.";
-    return null;
+    return conexionSql($error);
 }
 
 function normalizarAcuerdoSql($fila) {
@@ -264,9 +550,33 @@ function eliminarAcuerdoSql($empresaId, $tipo, $acuerdoId = "", &$error = null) 
     try {
         $acuerdoId = trim((string)$acuerdoId);
         if ($acuerdoId !== "") {
+            if (tablaSqlExiste("pagos") && columnaSqlExiste("pagos", "acuerdo_id")) {
+                $stmtPagos = $pdo->prepare("SELECT COUNT(*) FROM pagos WHERE acuerdo_id = ?");
+                $stmtPagos->execute([$acuerdoId]);
+                $pagosVinculados = intval($stmtPagos->fetchColumn());
+                if ($pagosVinculados > 0) {
+                    $error = "No se puede eliminar el acuerdo porque tiene $pagosVinculados pago(s) vinculado(s). Primero resolvé esos pagos.";
+                    return false;
+                }
+            }
+
             $stmt = $pdo->prepare("DELETE FROM acuerdos WHERE id = ?");
             $stmt->execute([$acuerdoId]);
             return $stmt->rowCount() > 0;
+        }
+
+        if (tablaSqlExiste("pagos") && columnaSqlExiste("pagos", "acuerdo_id")) {
+            $stmtPagos = $pdo->prepare(
+                "SELECT COUNT(*) FROM pagos p
+                 JOIN acuerdos a ON CAST(a.id AS CHAR) = p.acuerdo_id
+                 WHERE a.empresa_id = ? AND a.tipo = ? AND a.activa = 1"
+            );
+            $stmtPagos->execute([$empresaId, $tipo]);
+            $pagosVinculados = intval($stmtPagos->fetchColumn());
+            if ($pagosVinculados > 0) {
+                $error = "No se puede eliminar el acuerdo porque tiene $pagosVinculados pago(s) vinculado(s). Primero resolvé esos pagos.";
+                return false;
+            }
         }
 
         $stmt = $pdo->prepare("DELETE FROM acuerdos WHERE empresa_id = ? AND tipo = ? AND activa = 1");
@@ -762,6 +1072,32 @@ function agregarDirectorioZip($zip, $directorio, $nombreEnZip) {
     return true;
 }
 
+function agregarTablaSqlAlZip($zip, $tabla) {
+    $pdo = conexionSql($error);
+    if (!$pdo || !tablaSqlExiste($tabla)) return false;
+
+    $archivoTemporal = tempnam(sys_get_temp_dir(), "backup_" . $tabla . "_");
+    if ($archivoTemporal === false) return false;
+
+    try {
+        $stmt = $pdo->query("SELECT * FROM `$tabla`");
+        $filas = $stmt->fetchAll();
+        file_put_contents($archivoTemporal, json_encode($filas, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX);
+        $ok = $zip->addFile($archivoTemporal, "mysql/" . $tabla . ".json");
+        if ($ok) {
+            register_shutdown_function(function($archivo) {
+                if (is_file($archivo)) @unlink($archivo);
+            }, $archivoTemporal);
+        } else {
+            @unlink($archivoTemporal);
+        }
+        return $ok;
+    } catch (Throwable $e) {
+        @unlink($archivoTemporal);
+        return false;
+    }
+}
+
 function enviarBackupManual($empresasFile, $pagosFile, $auditoriaFile, $papeleraPagosFile, $uploadDir) {
     if (!class_exists("ZipArchive")) return false;
 
@@ -776,10 +1112,15 @@ function enviarBackupManual($empresasFile, $pagosFile, $auditoriaFile, $papelera
     }
 
     $ok = true;
-    $ok = $ok && is_file($empresasFile) && $zip->addFile($empresasFile, "empresas.json");
-    $ok = $ok && is_file($pagosFile) && $zip->addFile($pagosFile, "pagos.json");
-    $ok = $ok && is_file($auditoriaFile) && $zip->addFile($auditoriaFile, "auditoria.json");
-    $ok = $ok && is_file($papeleraPagosFile) && $zip->addFile($papeleraPagosFile, "papelera_pagos.json");
+    foreach (["empresas", "pagos", "auditoria", "papelera_pagos", "acuerdos"] as $tabla) {
+        if (tablaSqlExiste($tabla)) {
+            $ok = $ok && agregarTablaSqlAlZip($zip, $tabla);
+        }
+    }
+    if (is_file($empresasFile)) $zip->addFile($empresasFile, "respaldo_historico_json/empresas.json");
+    if (is_file($pagosFile)) $zip->addFile($pagosFile, "respaldo_historico_json/pagos.json");
+    if (is_file($auditoriaFile)) $zip->addFile($auditoriaFile, "respaldo_historico_json/auditoria.json");
+    if (is_file($papeleraPagosFile)) $zip->addFile($papeleraPagosFile, "respaldo_historico_json/papelera_pagos.json");
     $ok = $ok && agregarDirectorioZip($zip, $uploadDir, "comprobantes");
 
     if (!$zip->close() || !$ok) {
@@ -1128,16 +1469,18 @@ if (isset($_GET["backup"])) {
     }
 }
 
-$empresas = leerJson($empresasFile);
-$pagos = leerJson($pagosFile);
-$auditoria = leerJson($auditoriaFile);
-$papeleraPagos = leerJson($papeleraPagosFile);
+$empresas = obtenerEmpresas();
+$pagos = obtenerPagos();
+$auditoria = obtenerAuditoria();
+$papeleraPagos = obtenerPapeleraPagos();
 $errorAcuerdosSql = null;
 $empresas = aplicarAcuerdosSqlAEmpresas($empresas, $errorAcuerdosSql);
 $errorEmpresa = "";
 $coincidenciasEmpresa = ["cuit" => null, "exacta" => null, "parecidas" => []];
 $advertenciaEmpresa = false;
 $errorPago = "";
+$mensajeError = $_SESSION["mensaje_error"] ?? "";
+unset($_SESSION["mensaje_error"]);
 
 if (isset($_GET["auditoria"]) && !$esAdmin) {
     accesoDenegado();
@@ -1433,14 +1776,17 @@ if (isset($_POST["guardar_empresa"])) {
 
         if (!$editado) $empresas[] = $nueva;
 
-        guardarJson($empresasFile, $empresas);
-        registrarAuditoria(
-            $auditoriaFile,
-            $editado ? "editar_empresa" : "crear_empresa",
-            ($editado ? "Editó empresa " : "Creó empresa ") . detalleEmpresa($nueva)
-        );
-        header("Location: index.php");
-        exit;
+        if (!guardarEmpresaSql($nueva)) {
+            $errorEmpresa = "No se pudo guardar la empresa en MySQL.";
+        } else {
+            registrarAuditoria(
+                $auditoriaFile,
+                $editado ? "editar_empresa" : "crear_empresa",
+                ($editado ? "Editó empresa " : "Creó empresa ") . detalleEmpresa($nueva)
+            );
+            header("Location: index.php");
+            exit;
+        }
     }
 }
 
@@ -1678,34 +2024,40 @@ if (isset($_POST["guardar_pago"])) {
 
         if (!$editado) $pagos[] = $nuevo;
 
-        guardarJson($pagosFile, $pagos);
-        registrarAuditoria(
-            $auditoriaFile,
-            $editado ? "editar_pago" : "crear_pago",
-            ($editado ? "Editó pago de " : "Cargó pago de ") . detallePago($nuevo, $empresas) . " - " . $tipoDePago
-        );
-        if (count($comprobantesAgregados) > 0) {
+        if (!guardarPagoSql($nuevo)) {
+            if (count($comprobantesAgregados) > 0) {
+                eliminarComprobantePago(["comprobantes" => $comprobantesAgregados], $uploadDir);
+            }
+            $errorPago = "No se pudo guardar el pago en MySQL.";
+        } else {
             registrarAuditoria(
                 $auditoriaFile,
-                "agregar_comprobantes_pago",
-                "AgregÃ³ " . count($comprobantesAgregados) . " comprobantes al pago de " . (($empresaPago["razon"] ?? "Empresa") . " - " . $tipoPago . " - " . periodoParaInput($periodo))
+                $editado ? "editar_pago" : "crear_pago",
+                ($editado ? "Editó pago de " : "Cargó pago de ") . detallePago($nuevo, $empresas) . " - " . $tipoDePago
             );
+            if (count($comprobantesAgregados) > 0) {
+                registrarAuditoria(
+                    $auditoriaFile,
+                    "agregar_comprobantes_pago",
+                    "AgregÃ³ " . count($comprobantesAgregados) . " comprobantes al pago de " . (($empresaPago["razon"] ?? "Empresa") . " - " . $tipoPago . " - " . periodoParaInput($periodo))
+                );
+            }
+            if (!$editado && count($cheques) > 0) {
+                registrarAuditoria(
+                    $auditoriaFile,
+                    "crear_pago_cheques",
+                    "Cargó pago con " . count($cheques) . " cheque(s) de " . detallePago($nuevo, $empresas)
+                );
+            } elseif ($editado && fechasCheques(chequesPago($pagoExistente)) !== fechasCheques($cheques)) {
+                registrarAuditoria(
+                    $auditoriaFile,
+                    "editar_fechas_cheques",
+                    "Editó fechas de cobro de cheques de " . detallePago($nuevo, $empresas)
+                );
+            }
+            header("Location: index.php");
+            exit;
         }
-        if (!$editado && count($cheques) > 0) {
-            registrarAuditoria(
-                $auditoriaFile,
-                "crear_pago_cheques",
-                "Cargó pago con " . count($cheques) . " cheque(s) de " . detallePago($nuevo, $empresas)
-            );
-        } elseif ($editado && fechasCheques(chequesPago($pagoExistente)) !== fechasCheques($cheques)) {
-            registrarAuditoria(
-                $auditoriaFile,
-                "editar_fechas_cheques",
-                "Editó fechas de cobro de cheques de " . detallePago($nuevo, $empresas)
-            );
-        }
-        header("Location: index.php");
-        exit;
     }
 }
 
@@ -1726,12 +2078,13 @@ if (isset($_POST["marcar_cheque_cobrado"])) {
             $pagos[$pagoIndice]["cheques"][$indiceCheque]["usuario_cobrado"] = usuarioActual();
             $empresaCheque = buscarEmpresa($empresas, $pago["empresa_id"] ?? "");
             $fechaChequeAuditada = $pagos[$pagoIndice]["cheques"][$indiceCheque]["fecha_cobro"] ?? "";
-            guardarJson($pagosFile, $pagos);
-            registrarAuditoria(
-                $auditoriaFile,
-                "marcar_cheque_cobrado",
-                usuarioActual() . " marcó como cobrado cheque con fecha " . fechaParaMostrar($fechaChequeAuditada) . " de " . ($empresaCheque["razon"] ?? "Empresa eliminada")
-            );
+            if (guardarPagoSql($pagos[$pagoIndice])) {
+                registrarAuditoria(
+                    $auditoriaFile,
+                    "marcar_cheque_cobrado",
+                    usuarioActual() . " marcó como cobrado cheque con fecha " . fechaParaMostrar($fechaChequeAuditada) . " de " . ($empresaCheque["razon"] ?? "Empresa eliminada")
+                );
+            }
             break;
         }
     }
@@ -1756,8 +2109,7 @@ if (isset($_GET["eliminar_empresa"])) {
             break;
         }
     }
-    guardarJson($empresasFile, $empresas);
-    if ($empresaBaja) {
+    if ($empresaBaja && guardarEmpresaSql($empresaBaja)) {
         registrarAuditoria($auditoriaFile, "dar_de_baja_empresa", "Dio de baja empresa " . detalleEmpresa($empresaBaja));
     }
     header("Location: index.php");
@@ -1777,12 +2129,30 @@ if (isset($_GET["eliminar_pago"])) {
         $pagoEliminado["eliminado_por"] = usuarioActual();
         $pagoEliminado["fecha_eliminacion"] = date("Y-m-d H:i:s");
         $pagoEliminado["motivo"] = trim($_GET["motivo"] ?? "");
-        $papeleraPagos[] = $pagoEliminado;
-        eliminarComprobantePago($pagoEliminado, $uploadDir);
-        $pagos = array_values(array_filter($pagos, fn($p) => ($p["id"] ?? "") !== $id));
-        guardarJson($pagosFile, $pagos);
-        guardarJson($papeleraPagosFile, $papeleraPagos);
-        registrarAuditoria($auditoriaFile, "eliminar_pago", "Eliminó pago de " . detallePago($pagoEliminado, $empresas));
+        $pagoEliminadoSql = false;
+        $pdoEliminarPago = conexionSql($errorEliminarPago);
+
+        if ($pdoEliminarPago) {
+            try {
+                $pdoEliminarPago->beginTransaction();
+                if (!guardarPapeleraPagoSql($pagoEliminado)) {
+                    throw new RuntimeException("No se pudo enviar el pago a papelera.");
+                }
+                if (!eliminarPagoSql($id)) {
+                    throw new RuntimeException("No se pudo eliminar el pago original.");
+                }
+                $pdoEliminarPago->commit();
+                $pagoEliminadoSql = true;
+            } catch (Throwable $e) {
+                if ($pdoEliminarPago->inTransaction()) $pdoEliminarPago->rollBack();
+            }
+        }
+
+        if ($pagoEliminadoSql) {
+            eliminarComprobantePago($pagoEliminado, $uploadDir);
+            $pagos = array_values(array_filter($pagos, fn($p) => ($p["id"] ?? "") !== $id));
+            registrarAuditoria($auditoriaFile, "eliminar_pago", "Eliminó pago de " . detallePago($pagoEliminado, $empresas));
+        }
     }
     header("Location: index.php");
     exit;
@@ -1798,6 +2168,8 @@ if (isset($_GET["eliminar_acuerdo"], $_GET["tipo_acuerdo"])) {
         $errorEliminarAcuerdo = null;
         if (eliminarAcuerdoSql($empresaId, $tipoAcuerdoEliminar, $acuerdoIdEliminar, $errorEliminarAcuerdo)) {
             registrarAuditoria($auditoriaFile, "eliminar_acuerdo", "EliminÃ³ acuerdo de " . (($empresaEliminadaAcuerdo["razon"] ?? "Empresa") . " - " . $tipoAcuerdoEliminar));
+        } elseif ($errorEliminarAcuerdo) {
+            $_SESSION["mensaje_error"] = $errorEliminarAcuerdo;
         }
     }
 
@@ -1811,30 +2183,34 @@ if (isset($_GET["eliminar_comprobante"])) {
     $indiceComprobante = filter_var($_GET["indice"] ?? 0, FILTER_VALIDATE_INT);
     if ($indiceComprobante === false || $indiceComprobante < 0) $indiceComprobante = 0;
 
+    $pagoActualizado = null;
+    $rutaFisicaEliminar = null;
+    $detalleAuditoriaComprobante = "";
+
     foreach ($pagos as $k => $p) {
         if (($p["id"] ?? "") === $id) {
             $comprobantes = comprobantesPago($p);
             if (isset($comprobantes[$indiceComprobante])) {
-                $rutaFisica = rutaComprobanteFisico($comprobantes[$indiceComprobante], $uploadDir);
-                if ($rutaFisica && is_file($rutaFisica)) {
-                    @unlink($rutaFisica);
-                }
-
+                $rutaFisicaEliminar = rutaComprobanteFisico($comprobantes[$indiceComprobante], $uploadDir);
                 array_splice($comprobantes, $indiceComprobante, 1);
                 $pagos[$k]["comprobantes"] = array_values($comprobantes);
                 $pagos[$k]["comprobante"] = $comprobantes[0] ?? "";
                 $empresaComprobante = buscarEmpresa($empresas, $p["empresa_id"] ?? "");
-                registrarAuditoria(
-                    $auditoriaFile,
-                    "eliminar_comprobante_pago",
-                    "EliminÃ³ un comprobante del pago de " . (($empresaComprobante["razon"] ?? "Empresa") . " - " . ($p["tipo"] ?? "") . " - " . periodoParaInput($p["periodo"] ?? ""))
-                );
+                $detalleAuditoriaComprobante = "EliminÃ³ un comprobante del pago de " . (($empresaComprobante["razon"] ?? "Empresa") . " - " . ($p["tipo"] ?? "") . " - " . periodoParaInput($p["periodo"] ?? ""));
+                $pagoActualizado = $pagos[$k];
             }
             break;
         }
     }
 
-    guardarJson($pagosFile, $pagos);
+    if ($pagoActualizado && guardarPagoSql($pagoActualizado)) {
+        if ($rutaFisicaEliminar && is_file($rutaFisicaEliminar)) {
+            @unlink($rutaFisicaEliminar);
+        }
+        if ($detalleAuditoriaComprobante !== "") {
+            registrarAuditoria($auditoriaFile, "eliminar_comprobante_pago", $detalleAuditoriaComprobante);
+        }
+    }
     header("Location: index.php?editar_pago=" . urlencode($id));
     exit;
 }
@@ -2221,6 +2597,9 @@ th{background:#087a46;color:white}
 <main>
 <?php if ($backupError !== ""): ?>
 <p class="error"><?= e($backupError) ?></p>
+<?php endif; ?>
+<?php if ($mensajeError !== ""): ?>
+<p class="error"><?= e($mensajeError) ?></p>
 <?php endif; ?>
 
 <section class="tab-panel active" id="tab-inicio">
