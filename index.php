@@ -1310,7 +1310,7 @@ function usuarioPuedeVerAlertaAcuerdo($acuerdo, $usuario) {
     return $responsable !== "" && $responsable === $usuario;
 }
 
-function cuotaAcuerdoPagada($acuerdo, $empresaId, $tipo, $numeroCuota, $periodo, $pagos, $empresas) {
+function cuotaAcuerdoPagada($acuerdo, $empresaId, $tipo, $numeroCuota, $periodo, $pagos, $empresas, &$pagosUsados = null) {
     $previas = max(intval($acuerdo["cuotas_pagadas_previas"] ?? 0), 0);
     if ($numeroCuota <= $previas) return true;
 
@@ -1318,15 +1318,31 @@ function cuotaAcuerdoPagada($acuerdo, $empresaId, $tipo, $numeroCuota, $periodo,
     if (!$empresa) return false;
 
     $idsPrevios = array_flip(pagosPreviosIdsAcuerdo($acuerdo));
+    $montoCuota = max(floatval($acuerdo["monto_cuota"] ?? 0), 0);
+    $toleranciaMonetaria = 0.01;
     foreach ($pagos as $pago) {
         if (($pago["empresa_id"] ?? "") !== $empresaId || ($pago["tipo"] ?? "") !== $tipo) continue;
         if (periodoParaInput($pago["periodo"] ?? "") !== $periodo) continue;
 
+        $pagoId = (string)($pago["id"] ?? ($pago["sql_id"] ?? ""));
+        if (is_array($pagosUsados) && $pagoId !== "" && isset($pagosUsados[$pagoId])) continue;
+
         if (isset($idsPrevios[(string)($pago["id"] ?? "")])) {
+            if (is_array($pagosUsados) && $pagoId !== "") $pagosUsados[$pagoId] = true;
             return true;
         }
 
         if (pagoCorrespondeAcuerdo($pago, $acuerdo, $empresa, $tipo, $empresas)) {
+            if (is_array($pagosUsados) && $pagoId !== "") $pagosUsados[$pagoId] = true;
+            return true;
+        }
+
+        if (
+            pagoAcuerdoId($pago) === "" &&
+            tipoPagoCompatible($pago, $empresas) === "Cuota de acuerdo" &&
+            abs(floatval($pago["monto"] ?? 0) - $montoCuota) <= $toleranciaMonetaria
+        ) {
+            if (is_array($pagosUsados) && $pagoId !== "") $pagosUsados[$pagoId] = true;
             return true;
         }
     }
@@ -1337,13 +1353,16 @@ function cuotaAcuerdoPagada($acuerdo, $empresaId, $tipo, $numeroCuota, $periodo,
 function alertasCuotasAcuerdo($empresas, $pagos, $usuario) {
     $hoy = date("Y-m-d");
     $alertas = [];
+    $pagosUsados = [];
 
     foreach ($empresas as $empresa) {
         $empresaId = $empresa["id"] ?? "";
         if ($empresaId === "") continue;
+        if (isset($empresa["activa"]) && !$empresa["activa"]) continue;
 
         foreach (["Obra Social", "Sindicato", "Mutual"] as $tipo) {
             foreach (acuerdosEmpresaTipoTodos($empresa, $tipo) as $acuerdo) {
+                if (isset($acuerdo["activa"]) && !$acuerdo["activa"]) continue;
                 if (!usuarioPuedeVerAlertaAcuerdo($acuerdo, $usuario)) continue;
 
                 $cantidad = max(intval($acuerdo["cantidad_cuotas"] ?? 0), 0);
@@ -1352,7 +1371,7 @@ function alertasCuotasAcuerdo($empresas, $pagos, $usuario) {
                     if ($fechaVencimiento === "" || $fechaVencimiento > $hoy) continue;
                     $periodo = periodoCuotaAcuerdo($acuerdo, $numero);
                     if ($periodo === "") continue;
-                    if (cuotaAcuerdoPagada($acuerdo, $empresaId, $tipo, $numero, $periodo, $pagos, $empresas)) continue;
+                    if (cuotaAcuerdoPagada($acuerdo, $empresaId, $tipo, $numero, $periodo, $pagos, $empresas, $pagosUsados)) continue;
 
                     $alertas[] = [
                         "empresa_id" => $empresaId,

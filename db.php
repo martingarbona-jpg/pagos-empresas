@@ -3,7 +3,7 @@
 $host = "localhost";
 $dbname = "a0071254_pagos";
 $user = "a0071254_pagos";
-$pass = "PagosEmpresas2026Mza";
+$pass = "@VPa3GVwH*EW8gI";
 
 try {
     $pdo = new PDO(
