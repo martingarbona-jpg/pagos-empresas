@@ -53,6 +53,31 @@ function normalizarPeriodoMigracion($periodo) {
     return $periodo;
 }
 
+function indicePeriodoMigracion($periodo) {
+    $periodo = normalizarPeriodoMigracion($periodo);
+    if (!preg_match('/^(0[1-9]|1[0-2])\/\d{2}$/', $periodo)) return null;
+    [$mes, $anio] = array_map('intval', explode('/', $periodo));
+    return (2000 + $anio) * 12 + $mes;
+}
+
+function periodoDesdeIndiceMigracion($indice) {
+    $anio = intdiv($indice - 1, 12);
+    $mes = $indice - $anio * 12;
+    return str_pad((string)$mes, 2, "0", STR_PAD_LEFT) . "/" . substr((string)$anio, -2);
+}
+
+function periodoHastaMigracion($periodoDesde, $cantidadCuotas, $periodoHastaOriginal = "") {
+    $desde = indicePeriodoMigracion($periodoDesde);
+    $cantidad = intval($cantidadCuotas);
+    $hastaOriginal = normalizarPeriodoMigracion($periodoHastaOriginal);
+    if ($desde === null || $cantidad < 1) return $hastaOriginal;
+    $esperado = $desde + $cantidad - 1;
+    $guardado = indicePeriodoMigracion($hastaOriginal);
+    return $guardado === null || $guardado === $esperado - 1
+        ? periodoDesdeIndiceMigracion($esperado)
+        : $hastaOriginal;
+}
+
 function detectarEmpresaIdMigracion($empresa) {
     $preferidos = [
         "empresa_id",
@@ -251,7 +276,11 @@ try {
                 "monto_cuota" => floatval(acuerdoValor($acuerdo, "monto_cuota", 0)),
                 "cuotas_pagadas_previas" => max(intval(acuerdoValor($acuerdo, "cuotas_pagadas_previas", 0)), 0),
                 "periodo_desde" => normalizarPeriodoMigracion(acuerdoValor($acuerdo, "periodo_desde", "")),
-                "periodo_hasta" => normalizarPeriodoMigracion(acuerdoValor($acuerdo, "periodo_hasta", "")),
+                "periodo_hasta" => periodoHastaMigracion(
+                    acuerdoValor($acuerdo, "periodo_desde", ""),
+                    acuerdoValor($acuerdo, "cantidad_cuotas", 0),
+                    acuerdoValor($acuerdo, "periodo_hasta", "")
+                ),
                 "pagos_previos_ids" => pagosPreviosParaInsert($acuerdo),
                 "fecha_carga_acuerdo" => valorTexto(acuerdoValor($acuerdo, ["fecha_carga_acuerdo", "fecha_carga"], "")) ?: null,
                 "usuario_carga_acuerdo" => valorTexto(acuerdoValor($acuerdo, "usuario_carga_acuerdo", "")) ?: "ADMIN",

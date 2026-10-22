@@ -376,23 +376,26 @@ function normalizarAcuerdoSql($fila) {
         $ids = is_array($decodificado) ? $decodificado : array_filter(array_map("trim", explode(",", $ids)));
     }
 
-    return [
+    $periodoDesde = periodoParaInput($fila["periodo_desde"] ?? "");
+    $cantidadCuotas = intval($fila["cantidad_cuotas"] ?? 1);
+
+    return normalizarRangoAcuerdo([
         "id" => $fila["id"] ?? null,
         "empresa_id" => (string)($fila["empresa_id"] ?? ""),
         "tipo" => (string)($fila["tipo"] ?? ""),
         "monto_total" => floatval($fila["monto_total"] ?? 0),
-        "cantidad_cuotas" => intval($fila["cantidad_cuotas"] ?? 1),
+        "cantidad_cuotas" => $cantidadCuotas,
         "monto_cuota" => floatval($fila["monto_cuota"] ?? 0),
         "cuotas_pagadas_previas" => intval($fila["cuotas_pagadas_previas"] ?? 0),
         "pagos_previos_ids" => array_values(array_unique(array_filter(array_map("strval", is_array($ids) ? $ids : []), fn($id) => $id !== ""))),
-        "periodo_desde" => periodoParaInput($fila["periodo_desde"] ?? ""),
+        "periodo_desde" => $periodoDesde,
         "periodo_hasta" => periodoParaInput($fila["periodo_hasta"] ?? ""),
         "fecha_carga_acuerdo" => $fila["fecha_carga_acuerdo"] ?? "",
         "fecha_primer_pago" => $fila["fecha_primer_pago"] ?? "",
         "usuario_carga_acuerdo" => $fila["usuario_carga_acuerdo"] ?? "",
         "observaciones" => $fila["observaciones"] ?? "",
         "activa" => intval($fila["activa"] ?? 1) === 1
-    ];
+    ]);
 }
 
 function acuerdosSql(&$error = null, $soloActivos = true) {
@@ -709,6 +712,30 @@ function periodoDesdeIndice($indice) {
     $anioCompleto = intdiv($indice - 1, 12);
     $mes = $indice - $anioCompleto * 12;
     return str_pad((string)$mes, 2, "0", STR_PAD_LEFT) . "/" . substr((string)$anioCompleto, -2);
+}
+
+function periodoHastaPorCantidad($periodoDesde, $cantidadCuotas) {
+    $desde = periodoAIndice(periodoParaInput($periodoDesde));
+    $cantidad = intval($cantidadCuotas);
+    if ($desde === null || $cantidad < 1) return "";
+    return periodoDesdeIndice($desde + $cantidad - 1);
+}
+
+function normalizarRangoAcuerdo($acuerdo) {
+    if (!is_array($acuerdo)) return $acuerdo;
+    $periodoHastaEsperado = periodoHastaPorCantidad(
+        $acuerdo["periodo_desde"] ?? "",
+        $acuerdo["cantidad_cuotas"] ?? 0
+    );
+    $periodoHastaGuardado = periodoParaInput($acuerdo["periodo_hasta"] ?? "");
+    $indiceEsperado = periodoAIndice($periodoHastaEsperado);
+    $indiceGuardado = periodoAIndice($periodoHastaGuardado);
+    if ($periodoHastaEsperado !== "" && ($indiceGuardado === null || $indiceGuardado === $indiceEsperado - 1)) {
+        $acuerdo["periodo_hasta"] = $periodoHastaEsperado;
+    } else {
+        $acuerdo["periodo_hasta"] = $periodoHastaGuardado;
+    }
+    return $acuerdo;
 }
 
 function fechaCorrespondePeriodo($fecha, $periodo) {
@@ -1175,7 +1202,7 @@ function acuerdoDefault() {
 function acuerdoEmpresa($empresa, $tipo) {
     $base = acuerdoDefault();
     if (isset($empresa["acuerdos"]) && is_array($empresa["acuerdos"]) && isset($empresa["acuerdos"][$tipo]) && is_array($empresa["acuerdos"][$tipo])) {
-        return array_merge($base, $empresa["acuerdos"][$tipo]);
+        return normalizarRangoAcuerdo(array_merge($base, $empresa["acuerdos"][$tipo]));
     }
 
     if (!empty($empresa["_acuerdos_sql_leidos"])) {
@@ -1183,7 +1210,7 @@ function acuerdoEmpresa($empresa, $tipo) {
     }
 
     if (!empty($empresa["monto_total"]) || !empty($empresa["monto_cuota"]) || !empty($empresa["periodo_desde"]) || !empty($empresa["periodo_hasta"])) {
-        return array_merge($base, [
+        return normalizarRangoAcuerdo(array_merge($base, [
             "monto_total" => floatval($empresa["monto_total"] ?? 0),
             "cantidad_cuotas" => max(intval($empresa["cantidad_cuotas"] ?? 1), 1),
             "monto_cuota" => floatval($empresa["monto_cuota"] ?? 0),
@@ -1191,7 +1218,7 @@ function acuerdoEmpresa($empresa, $tipo) {
             "periodo_desde" => periodoParaInput($empresa["periodo_desde"] ?? ""),
             "periodo_hasta" => periodoParaInput($empresa["periodo_hasta"] ?? ""),
             "observaciones" => $empresa["observaciones_acuerdo"] ?? ""
-        ]);
+        ]));
     }
 
     return $base;
@@ -1232,7 +1259,7 @@ function acuerdosEmpresaTipoTodos($empresa, $tipo) {
     $vistos = [];
     $agregar = function ($acuerdo) use (&$acuerdos, &$vistos) {
         if (!is_array($acuerdo)) return;
-        $normalizado = array_merge(acuerdoDefault(), $acuerdo);
+        $normalizado = normalizarRangoAcuerdo(array_merge(acuerdoDefault(), $acuerdo));
         $clave = acuerdoIdentificador($normalizado);
         if ($clave === "") $clave = implode("|", [
             periodoParaInput($normalizado["periodo_desde"] ?? ""),
@@ -1251,7 +1278,7 @@ function acuerdosEmpresaTipoTodos($empresa, $tipo) {
     $historial = $empresa["acuerdos_historial"][$tipo] ?? [];
     if (is_array($historial)) {
         foreach ($historial as $acuerdo) {
-            $acuerdoConBase = array_merge(acuerdoDefault(), is_array($acuerdo) ? $acuerdo : []);
+            $acuerdoConBase = normalizarRangoAcuerdo(array_merge(acuerdoDefault(), is_array($acuerdo) ? $acuerdo : []));
             if (
                 intval($acuerdoConBase["cantidad_cuotas"] ?? 0) >= 2 &&
                 floatval($acuerdoConBase["monto_total"] ?? 0) > 0 &&
@@ -1871,6 +1898,7 @@ if (isset($_POST["guardar_acuerdo"])) {
     }
 
     if ($errorEmpresa === "") {
+        $periodoHastaAcuerdo = periodoHastaPorCantidad($periodoDesdeAcuerdo, $cantidadCuotasAcuerdo);
         $acuerdoEditado = false;
         $acuerdoAnteriorHistorico = false;
         $errorGuardarAcuerdo = null;
@@ -3489,11 +3517,26 @@ ${candidatos.map(({ pago, dentro }) => `<tr class="${dentro ? "" : "pago-fuera-p
         }
     };
 
+    const actualizarPeriodoHastaAcuerdo = () => {
+        const cantidadInput = acuerdoFormEl.querySelector('input[name="acuerdo_cantidad_cuotas"]');
+        const periodoDesdeInput = acuerdoFormEl.querySelector('input[name="acuerdo_periodo_desde"]');
+        const periodoHastaInput = acuerdoFormEl.querySelector('input[name="acuerdo_periodo_hasta"]');
+        const periodoHasta = periodoHastaPorCantidadCliente(periodoDesdeInput?.value || "", cantidadInput?.value || 0);
+        if (!periodoHastaInput || !periodoHasta) return;
+        periodoHastaInput.value = periodoHasta;
+        renderPagosPreviosAcuerdo();
+        actualizarResumenAcuerdo();
+    };
+
     acuerdoFormEl.addEventListener("input", actualizarResumenAcuerdo);
     acuerdoFormEl.addEventListener("change", actualizarResumenAcuerdo);
     acuerdoFormEl.actualizarResumen = actualizarResumenAcuerdo;
     renderPagosPreviosAcuerdo(pagosPreviosFormData);
     actualizarResumenAcuerdo();
+
+    ["acuerdo_cantidad_cuotas", "acuerdo_periodo_desde"].forEach((nombre) => {
+        acuerdoFormEl.querySelector(`[name="${nombre}"]`)?.addEventListener("input", actualizarPeriodoHastaAcuerdo);
+    });
 
     ["acuerdo_periodo_desde", "acuerdo_periodo_hasta"].forEach((nombre) => {
         acuerdoFormEl.querySelector(`[name="${nombre}"]`)?.addEventListener("change", () => renderPagosPreviosAcuerdo());
@@ -4276,6 +4319,28 @@ function periodoDesdeIndice(indice) {
     return String(mes).padStart(2, "0") + "/" + String(anioCompleto % 100).padStart(2, "0");
 }
 
+function periodoHastaPorCantidadCliente(periodoDesde, cantidadCuotas) {
+    const desde = periodoAMesIndice(periodoDesde);
+    const cantidad = Number.parseInt(cantidadCuotas || 0, 10);
+    if (desde === null || cantidad < 1) return "";
+    return periodoDesdeIndice(desde + cantidad - 1);
+}
+
+function normalizarRangoAcuerdoCliente(acuerdo) {
+    const normalizado = { ...(acuerdo || {}) };
+    const periodoHastaEsperado = periodoHastaPorCantidadCliente(
+        normalizado.periodo_desde || "",
+        normalizado.cantidad_cuotas || 0
+    );
+    const periodoHastaGuardado = periodoNormalizado(normalizado.periodo_hasta || "");
+    const indiceEsperado = periodoAMesIndice(periodoHastaEsperado);
+    const indiceGuardado = periodoAMesIndice(periodoHastaGuardado);
+    normalizado.periodo_hasta = periodoHastaEsperado && (indiceGuardado === null || indiceGuardado === indiceEsperado - 1)
+        ? periodoHastaEsperado
+        : periodoHastaGuardado;
+    return normalizado;
+}
+
 function fechaBaseAcuerdoCliente(acuerdo) {
     const fecha = (acuerdo?.fecha_primer_pago || acuerdo?.fecha_carga_acuerdo || "").toString().slice(0, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) return null;
@@ -4362,12 +4427,12 @@ function acuerdoEmpresaTipo(empresa, tipo) {
         activa: true
     };
     if (empresa?.acuerdos && empresa.acuerdos[tipo]) {
-        return { ...base, ...empresa.acuerdos[tipo] };
+        return normalizarRangoAcuerdoCliente({ ...base, ...empresa.acuerdos[tipo] });
     }
     if (empresa?._acuerdos_sql_leidos) {
         return base;
     }
-    return {
+    return normalizarRangoAcuerdoCliente({
         ...base,
         monto_total: empresa?.monto_total || 0,
         cantidad_cuotas: empresa?.cantidad_cuotas || 1,
@@ -4376,12 +4441,12 @@ function acuerdoEmpresaTipo(empresa, tipo) {
         periodo_desde: empresa?.periodo_desde || "",
         periodo_hasta: empresa?.periodo_hasta || "",
         observaciones: empresa?.observaciones_acuerdo || ""
-    };
+    });
 }
 
 function acuerdosHistorialEmpresaTipo(empresa, tipo) {
     const lista = empresa?.acuerdos_historial?.[tipo];
-    return Array.isArray(lista) ? lista : [];
+    return Array.isArray(lista) ? lista.map(normalizarRangoAcuerdoCliente) : [];
 }
 
 function acuerdosAnterioresEmpresaTipo(empresa, tipo) {
